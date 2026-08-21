@@ -366,10 +366,15 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
             return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": period, "metric": "absolute_return", "direction": "descending", "limit": 1}}
         return {"type": "tool", "tool": "get_cash_flows", "arguments": {"fund": fund or "BPT", "period": period}}
 
+    if _has_any(text, "weaker", "weaker than", "stronger", "stronger than", "worse than", "better than") and _has_any(text, "bpt", "ble", "other fund", "fund"):
+        metric = "fund_excess_return_pp" if _has_any(text, "benchmark", "relative", "excess") else "fund_return_pct"
+        return {"type": "tool", "tool": "compare_funds", "arguments": {"metric": metric, "period": period}}
+
     if _has_any(text, "other fund", "with ble", "with bpt", "compare the two", "compare that", "ble any better", "what about bpt", "both", "pension doing", "bigger problem", "closer to target"):
         if asset_class:
             return {"type": "tool", "tool": "compare_funds", "arguments": {"metric": "allocation_drift_pp", "period": period, "asset_class": asset_class}}
-        return {"type": "tool", "tool": "compare_funds", "arguments": {"metric": "fund_excess_return_pp", "period": period}}
+        metric = "fund_excess_return_pp" if _has_any(text, "benchmark", "relative", "excess") else "fund_return_pct"
+        return {"type": "tool", "tool": "compare_funds", "arguments": {"metric": metric, "period": period}}
 
     if _has_any(text, "changed", "recently", "middle of the year", "second half", "towards the end", "building all year", "last quarter", "different now", "q4 worse", "improve", "start moving", "last six months", "recent thing", "got worse"):
         if previous_manager and ("q4" in text or "they" in text):
@@ -2318,6 +2323,31 @@ def _answer_from_tool_result(result: dict[str, Any], messages: list[BaseMessage]
             return (
                 f"For {asset} allocation drift in {result['period']}, {first['fund']} was "
                 f"{first['metric']['value']:+.2f}pp and {second['fund']} was {second['metric']['value']:+.2f}pp."
+            )
+        metric = result.get("metric")
+        latest = _latest_human_text(messages or []).lower()
+        if metric in {"fund_return_pct", "fund_excess_return_pp"}:
+            first_value = float(first["metric"]["value"])
+            second_value = float(second["metric"]["value"])
+            higher = first if first_value >= second_value else second
+            lower = second if first_value >= second_value else first
+            higher_value = float(higher["metric"]["value"])
+            lower_value = float(lower["metric"]["value"])
+            difference = higher_value - lower_value
+            label = "FY2026 return" if metric == "fund_return_pct" else "benchmark-relative excess return"
+            value_unit = "%" if metric == "fund_return_pct" else "pp"
+            premise_fund = "BLE" if "ble" in latest else "BPT" if "bpt" in latest else None
+            premise_weaker = _has_any(latest, "weaker", "worse", "behind", "underperform")
+            premise_stronger = _has_any(latest, "stronger", "better", "ahead", "outperform")
+            if premise_weaker and (not premise_fund or premise_fund == higher["fund"]):
+                lead = f"Actually, {higher['fund']} is stronger, not weaker, on {label}"
+            elif premise_stronger and premise_fund == lower["fund"]:
+                lead = f"Actually, {lower['fund']} is weaker, not stronger, on {label}"
+            else:
+                lead = f"{higher['fund']} is stronger on {label}"
+            return (
+                f"{lead}: {higher['fund']} was {higher_value:.2f}{value_unit}, versus "
+                f"{lower['fund']} at {lower_value:.2f}{value_unit}, a gap of {difference:.2f}{value_unit}."
             )
         return (
             f"For {result['metric']} in {result['period']}, {first['fund']} was {first['metric']['value']:.2f} "
