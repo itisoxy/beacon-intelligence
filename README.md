@@ -6,8 +6,8 @@ Beacon Intelligence is a prototype investment intelligence application built for
 My approach to the build was deliberately problem first rather than technology first.
 I tend to work through projects using:
 
-Problem → Solution → System → Delivery
---------------------------------------
+**Problem → Solution → System → Delivery
+
 
 So I didn't start by choosing an AI model and then looking for somewhere to use it.
 I started by looking at the funds, the type of user I was designing for, the information they would need and the questions they would realistically want answered.
