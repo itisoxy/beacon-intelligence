@@ -224,10 +224,10 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
         return {"type": "answer", "answer": "The supplied Beacon data cannot establish that conclusion. I can show sourced performance, benchmark-relative results, allocation movement, cash flows, or provenance instead."}
 
     if _has_any(text, "source", "evidence", "where did that come from", "where did this come from"):
-        record_id = _latest_record_id(messages)
+        record_id = _latest_record_id(messages, context)
         if record_id:
             return {"type": "tool", "tool": "get_source_record", "arguments": {"record_id": record_id}}
-        return {"type": "clarify", "question": "Which previous number should I trace to source?"}
+        return {"type": "clarify", "question": "Which result should I source: the latest performance result, allocation result, manager result, or research signal?"}
 
     if text.strip() in {"why", "why?", "why is that", "why does that matter", "why does this matter"}:
         signal_id = _latest_research_signal_id(messages, context)
@@ -241,6 +241,42 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
 
     if _has_any(text, "what about managers", "managers?"):
         return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": period, "asset_class": asset_class, "metric": "excess_return", "direction": "ascending", "limit": 5}}
+
+    if _has_any(text, "asset allocation trend"):
+        if asset_class or previous_asset:
+            return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": fund or "BPT", "asset_class": asset_class or previous_asset}}
+        return {"type": "clarify", "question": "Which asset allocation trend should I show: Cash, Private Equity, Public Equity, Fixed Income, Real Assets, or Hedge Funds?"}
+
+    if _has_any(text, "manager performance trend"):
+        if previous_manager:
+            return {"type": "tool", "tool": "get_manager_history", "arguments": {"manager": previous_manager["manager"], "fund": previous_manager.get("fund") or fund}}
+        return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": period, "metric": "excess_return", "direction": "ascending", "limit": 5}}
+
+    if _has_any(text, "fund return trend"):
+        return {"type": "tool", "tool": "get_fund_performance", "arguments": {"fund": fund or "BPT", "period": period}}
+
+    if asset_class and _has_any(prior, "which allocation should i compare", "which quarterly trend", "allocation trend", "compare allocation"):
+        if _has_any(prior, "compare") and not _has_any(text, "trend", "quarterly"):
+            return {"type": "tool", "tool": "compare_funds", "arguments": {"metric": "allocation_drift_pp", "period": period, "asset_class": asset_class}}
+        return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": fund or "BPT", "asset_class": asset_class}}
+
+    if _has_any(text, "compare allocation", "compare allocations", "compare allocation drift", "compare policy"):
+        if asset_class or previous_asset:
+            return {
+                "type": "tool",
+                "tool": "compare_funds",
+                "arguments": {"metric": "allocation_drift_pp", "period": period, "asset_class": asset_class or previous_asset},
+            }
+        if fund:
+            return {"type": "tool", "tool": "rank_asset_allocations", "arguments": {"fund": fund, "period": period, "direction": "largest_absolute", "limit": 5}}
+        return {"type": "clarify", "question": "Which allocation should I compare: Cash, Private Equity, Public Equity, Fixed Income, Real Assets, or Hedge Funds?"}
+
+    if _has_any(text, "show quarterly trend", "quarterly trend", "show trend", "show quarterly"):
+        if asset_class or previous_asset:
+            return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": fund or "BPT", "asset_class": asset_class or previous_asset}}
+        if previous_manager:
+            return {"type": "tool", "tool": "get_manager_history", "arguments": {"manager": previous_manager["manager"], "fund": previous_manager.get("fund") or fund}}
+        return {"type": "clarify", "question": "Which quarterly trend should I show: an asset allocation trend, manager performance trend, or fund return trend?"}
 
     if _has_any(text, "and ble", "what about ble", "ble?"):
         if previous_asset:
@@ -277,15 +313,15 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
             return {"type": "tool", "tool": "get_manager_performance", "arguments": previous_manager}
 
     if _has_any(text, "where did those numbers come from", "where did that number come from"):
-        record_id = _latest_record_id(messages)
+        record_id = _latest_record_id(messages, context)
         if record_id:
             return {"type": "tool", "tool": "get_source_record", "arguments": {"record_id": record_id}}
-        return {"type": "clarify", "question": "Which previous number should I trace to source?"}
+        return {"type": "clarify", "question": "Which result should I source: the latest performance result, allocation result, manager result, or research signal?"}
     if _has_any(text, "where are you getting", "show me the source", "which workbook", "where exactly", "how do you know", "prove that", "what did you use"):
-        record_id = _latest_record_id(messages)
+        record_id = _latest_record_id(messages, context)
         if record_id:
             return {"type": "tool", "tool": "get_source_record", "arguments": {"record_id": record_id}}
-        return {"type": "clarify", "question": "Which previous number should I trace to source?"}
+        return {"type": "clarify", "question": "Which result should I source: the latest performance result, allocation result, manager result, or research signal?"}
     if _has_any(text, "reconciled", "data clean", "trust that number", "can i trust"):
         return {"type": "tool", "tool": "validate_reconciliation", "arguments": {"fund": fund or "BPT", "period": _quarter_for_validation(period)}}
 
@@ -1065,6 +1101,13 @@ def _context_from_tool_result(result: dict[str, Any]) -> dict[str, Any]:
                 context["last_manager"] = first["manager"]
     elif tool in {"get_asset_allocation", "get_allocation_history", "rank_asset_allocations"}:
         context["active_dimension"] = "allocation"
+        rows = result.get("rows") or result.get("history") or []
+        if rows and isinstance(rows[0], dict):
+            first = rows[0]
+            for key in ("fund", "period", "asset_class"):
+                if first.get(key) is not None:
+                    context[key] = first[key]
+                    context[f"active_{key}"] = first[key]
     elif tool in {"get_fund_performance", "rank_funds", "compare_funds"}:
         context["active_dimension"] = "performance"
         rows = result.get("rows") or []
@@ -1383,9 +1426,9 @@ def _response_lead_in(user_message: str, observations: list[dict[str, Any]], con
         return "On the source behind that result"
     if "relative to benchmark" in latest or "against benchmark" in latest:
         return "On benchmark-relative performance"
-    if "and ble" in latest or fund == "BLE" and "compare" in latest:
+    if tool == "compare_funds" and ("and ble" in latest or fund == "BLE" and "compare" in latest):
         return "On BLE in comparison"
-    if "and bpt" in latest or fund == "BPT" and "compare" in latest:
+    if tool == "compare_funds" and ("and bpt" in latest or fund == "BPT" and "compare" in latest):
         return "On BPT in comparison"
     if "worst" in latest or "weakest" in latest:
         return "On the weakest manager in that ranking"
@@ -1666,6 +1709,25 @@ def _suggest_clarification_options(answer: str, observations: list[dict[str, Any
         return [
             {"label": "Allocation", "message": "Allocation."},
             {"label": "Manager performance", "message": "Manager performance."},
+        ]
+    if "which allocation" in text or "asset allocation trend" in text:
+        return [
+            {"label": "Cash", "message": "Cash."},
+            {"label": "Private Equity", "message": "Private Equity."},
+            {"label": "Public Equity", "message": "Public Equity."},
+            {"label": "Fixed Income", "message": "Fixed Income."},
+        ]
+    if "which result should i source" in text:
+        return [
+            {"label": "Latest result", "message": "Source the latest result."},
+            {"label": "Performance", "message": "Source the performance result."},
+            {"label": "Allocation", "message": "Source the allocation result."},
+        ]
+    if "which quarterly trend" in text:
+        return [
+            {"label": "Asset allocation", "message": "Asset allocation trend."},
+            {"label": "Manager performance", "message": "Manager performance trend."},
+            {"label": "Fund return", "message": "Fund return trend."},
         ]
     return []
 
@@ -2355,7 +2417,18 @@ def _quarter_for_validation(period: str) -> str:
     return period
 
 
-def _latest_record_id(messages: list[BaseMessage]) -> str | None:
+def _latest_record_id(messages: list[BaseMessage], context: dict[str, Any] | None = None) -> str | None:
+    for key in ("last_record_ids", "source_record_ids", "record_ids"):
+        values = (context or {}).get(key)
+        if isinstance(values, list) and values:
+            return str(values[0])
+        if isinstance(values, str) and values:
+            return values
+    last_tool_result = (context or {}).get("last_tool_result")
+    if isinstance(last_tool_result, dict):
+        values = last_tool_result.get("record_ids")
+        if isinstance(values, list) and values:
+            return str(values[0])
     for message in reversed(messages):
         if not isinstance(message, ToolMessage):
             continue
