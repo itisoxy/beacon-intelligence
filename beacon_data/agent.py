@@ -215,7 +215,7 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
     if text.strip() in {"why", "why?", "why is that", "why does that matter", "why does this matter"}:
         signal_id = _latest_research_signal_id(messages, context)
         if signal_id:
-            return {"type": "tool", "tool": "get_research_signals", "arguments": {"fund": fund, "period": period, "asset_class": asset_class}}
+            return {"type": "tool", "tool": "get_research_signals", "arguments": {"fund": fund, "period": period, "asset_class": asset_class, "signal_id": signal_id}}
         if recent_context.get("last_response_type") == "fund_comparison":
             return {"type": "tool", "tool": "compare_funds", "arguments": {"metric": recent_context.get("metric") or "fund_excess_return_pp", "period": period}}
         if previous_manager:
@@ -710,6 +710,7 @@ class BeaconToolAdapter:
         period: str | None = None,
         asset_class: str | None = None,
         manager: str | None = None,
+        signal_id: str | None = None,
     ) -> dict[str, Any]:
         """Retrieve ranked evidence-backed Beacon research/Insight objects. Use for what stands out, what to investigate, risks, concerns, CIO focus areas, red flags or unusual developments."""
         result = self.tools.get_research_signals(fund=fund, period=period, asset_class=asset_class, manager=manager)
@@ -717,12 +718,20 @@ class BeaconToolAdapter:
             return result
         rows = []
         for row in result["rows"]:
+            if signal_id and signal_id not in {row.get("id"), row.get("signal_id")}:
+                continue
             enriched = dict(row)
             enriched.setdefault("fund", fund or row.get("fund"))
             enriched.setdefault("asset_class", asset_class or row.get("asset_class") or _asset_from_text(row["headline"].lower()))
             enriched.setdefault("manager", manager or row.get("manager") or _manager_from_headline(row["headline"], self.tools.model))
             rows.append(enriched)
-        return _clean_result("get_research_signals", result["arguments"], {"rows": rows})
+        if signal_id and not rows:
+            return _clean_result(
+                "get_research_signals",
+                {**result["arguments"], "signal_id": signal_id},
+                {"rows": []},
+            )
+        return _clean_result("get_research_signals", {**result["arguments"], "signal_id": signal_id}, {"rows": rows})
 
     def compare_funds(self, metric: str, period: str, asset_class: str | None = None) -> dict[str, Any]:
         """Compare canonical metrics across BPT and BLE. Use for other-fund, both-funds, which fund did better, closer-to-policy or cross-fund comparison questions."""

@@ -281,6 +281,14 @@ function askConversation() {
     ${state.ask.result && state.ask.result.outcome !== "clarify" ? askFollowups(state.ask.result) : ""}
   </div>`;
 }
+function askConversationInline() {
+  if (!state.ask.messages.length && !state.ask.loading && !state.ask.error) return "";
+  return `<div class="ask-thread ask-thread-compact">
+    ${state.ask.messages.map((message, index) => askMessage(message, index)).join("")}
+    ${state.ask.loading && state.ask.status ? `<article class="ask-message beacon ask-loading"><p class="eyebrow">Beacon</p><h3>${escapeHtml(state.ask.status)}<span>${escapeHtml(state.ask.loadingDots)}</span></h3></article>` : ""}
+    ${state.ask.error ? `<article class="ask-message beacon ask-error"><p class="eyebrow">Beacon</p><h3>${escapeHtml(state.ask.error)}</h3></article>` : ""}
+  </div>`;
+}
 function askMessage(message, index = 0) {
   if (message.role === "user") {
     return `<article class="ask-message user" data-ask-message-index="${index}"><p class="eyebrow">User</p><h3>${escapeHtml(message.content)}</h3></article>`;
@@ -595,10 +603,16 @@ async function typeAskAnswer(answer) {
 
 function scrollAskLatestMessage(role = "beacon") {
   requestAnimationFrame(() => {
-    const scoped = [...document.querySelectorAll(role === "user" ? ".ask-message.user" : ".ask-message.beacon")];
-    const all = [...document.querySelectorAll(".ask-message")];
+    const root = state.drawer?.type === "askInsight" ? document.querySelector(".drawer.open") : document;
+    if (!root) return;
+    const scoped = [...root.querySelectorAll(role === "user" ? ".ask-message.user" : ".ask-message.beacon")];
+    const all = [...root.querySelectorAll(".ask-message")];
     const target = scoped[scoped.length - 1] || all[all.length - 1];
     if (!target) return;
+    if (state.drawer?.type === "askInsight") {
+      target.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      return;
+    }
     const hero = document.querySelector(".ask-shell.has-answer .ask-hero");
     const offset = (hero?.getBoundingClientRect().height || 0) + 18;
     const top = target.getBoundingClientRect().top + window.scrollY - offset;
@@ -787,7 +801,10 @@ function askCurrentContext() {
     asset_class: state.assetClass === "All" ? null : state.assetClass,
     manager: state.manager === "All" ? null : state.manager,
     source_page: state.ask.context?.source_page || "ask",
-    research_signal_id: state.ask.context?.research_signal_id || null
+    research_signal_id: state.ask.context?.research_signal_id || null,
+    signal_id: state.ask.context?.signal_id || state.ask.context?.research_signal_id || null,
+    headline: state.ask.context?.headline || null,
+    source_record_ids: state.ask.context?.source_record_ids || []
   };
 }
 function hero(s, qoq) {
@@ -955,6 +972,7 @@ function researchStory(signal) {
         <div class="story-actions">
           <button class="text-action" data-evidence="${signal.id}">View evidence</button>
           <button class="text-action" data-analysis="${signal.id}">View full analysis</button>
+          <button class="text-action" data-beacon-context="${signal.id}">Ask Beacon about this</button>
         </div>
       </div>
       <div class="story-visual">${researchVisual(signal)}</div>
@@ -966,7 +984,7 @@ function researchStory(signal) {
         ${signal.cio_question ? `<p class="eyebrow matter-label">Question for consideration</p><p>${signal.cio_question}</p>` : ""}
         ${insightBulletList("What to check next", signal.what_to_check_next)}
       </div>
-      <button class="sparkle-action" title="Explore with Beacon" aria-label="Explore this insight with Beacon" data-beacon-context="${signal.id}">&#10022;</button>
+      <button class="sparkle-action" title="Ask Beacon about this" aria-label="Ask Beacon about this insight" data-beacon-context="${signal.id}">&#10022;</button>
     </div>
   </article>`;
 }
@@ -1032,6 +1050,7 @@ function drawerContent() {
   if (state.drawer.type === "evidence") return evidenceDrawer(state.drawer.id, state.drawer.mode);
   if (state.drawer.type === "askEvidence") return askEvidenceDrawer();
   if (state.drawer.type === "askHow") return askHowDrawer();
+  if (state.drawer.type === "askInsight") return askInsightDrawer();
   return managerDrawer(state.drawer.id);
 }
 function askEvidenceDrawer() {
@@ -1049,6 +1068,30 @@ function askHowDrawer() {
   return `<div class="drawer-head"><div><p class="eyebrow">How Beacon answered</p><h2>Safe application events</h2></div><button class="close" onclick="closeDrawer()">×</button></div>
     <div class="ask-event-list">${events.map(event => `<div><span></span><strong>${event.label || humanLabel(event.event || "")}</strong></div>`).join("") || `<p class="micro">No events recorded.</p>`}</div>
     <p class="micro" style="margin-top:18px">This log shows application events only. It does not expose hidden model reasoning.</p>`;
+}
+function askInsightDrawer() {
+  const signal = findSignal(state.drawer?.id || state.ask.context?.research_signal_id);
+  const headline = state.ask.context?.headline || signal?.headline || "Selected Insight";
+  const contextLine = [
+    state.ask.context?.fund || signal?.fund,
+    state.ask.context?.period || signal?.period,
+    state.ask.context?.asset_class || signal?.asset_class,
+    state.ask.context?.manager || signal?.manager
+  ].filter(Boolean).join(" / ");
+  const starters = ["Why does this matter?", "Show the evidence", "Has this worsened?", "What should I check next?"];
+  return `<div class="drawer-head"><div><p class="eyebrow">Ask Beacon</p><h2>Ask Beacon</h2></div><button class="close" onclick="closeDrawer()">x</button></div>
+    <section class="ask-insight-context">
+      <p class="eyebrow">Selected Insight</p>
+      <h3>${escapeHtml(headline)}</h3>
+      ${contextLine ? `<p class="micro">${escapeHtml(contextLine)}</p>` : ""}
+    </section>
+    <div class="ask-drawer-starters">${starters.map(askSuggestionButton).join("")}</div>
+    ${askConversationInline()}
+    <form class="ask-drawer-form" id="askDrawerForm">
+      <input id="askDrawerInput" placeholder="Ask Beacon..." autocomplete="off" ${state.ask.loading ? "disabled" : ""}>
+      <button type="submit" ${state.ask.loading ? "disabled" : ""}>Ask</button>
+    </form>
+    <button class="text-action ask-open-full" data-open-full-ask="true">Open full Ask Beacon -&gt;</button>`;
 }
 function formatAskEvidenceValue(metric) {
   const value = metric.unit === "USD millions" ? fmtMoney(metric.value) : metric.unit === "percent" ? fmtPct(metric.value, 2) : metric.unit === "percentage points" ? fmtPp(metric.value) : metric.value_text || metric.value;
@@ -1335,6 +1378,17 @@ function bindEvents() {
   document.querySelectorAll("[data-scroll-signal]").forEach(el => el.addEventListener("click", () => document.getElementById(`signal-${el.dataset.scrollSignal}`)?.scrollIntoView({ behavior: "smooth", block: "start" })));
   document.querySelectorAll("[data-evidence]").forEach(el => el.addEventListener("click", () => openDrawer("evidence", el.dataset.evidence, "evidence")));
   document.querySelectorAll("[data-analysis]").forEach(el => el.addEventListener("click", () => openDrawer("evidence", el.dataset.analysis, "analysis")));
+  document.querySelectorAll("[data-beacon-context]").forEach(el => el.addEventListener("click", () => openAskBeaconInsight(el.dataset.beaconContext)));
+  if ($("#askDrawerForm")) $("#askDrawerForm").addEventListener("submit", e => {
+    e.preventDefault();
+    submitAskMessage($("#askDrawerInput").value);
+  });
+  document.querySelectorAll("[data-open-full-ask]").forEach(el => el.addEventListener("click", () => {
+    state.page = "Ask Beacon";
+    state.drawer = null;
+    render();
+    scrollAskLatestMessage("beacon");
+  }));
 }
 function applyAskContext(raw) {
   try {
@@ -1345,11 +1399,38 @@ function applyAskContext(raw) {
     if (context.manager) state.manager = context.manager;
     state.ask.context = {
       source_page: "insights",
-      research_signal_id: context.research_signal_id || null
+      research_signal_id: context.research_signal_id || context.signal_id || null,
+      signal_id: context.signal_id || context.research_signal_id || null,
+      headline: context.headline || null,
+      source_record_ids: context.source_record_ids || []
     };
   } catch {
     state.ask.context = {};
   }
+}
+function insightAskContext(signal) {
+  return {
+    source_page: "insights",
+    research_signal_id: signal.id,
+    signal_id: signal.id,
+    fund: signal.fund || null,
+    period: signal.period || null,
+    asset_class: signal.asset_class || null,
+    manager: signal.manager || null,
+    headline: signal.headline || signal.research_question || null,
+    source_record_ids: signal.source_record_ids || []
+  };
+}
+function openAskBeaconInsight(signalId) {
+  const signal = findSignal(signalId);
+  if (!signal) return;
+  const context = insightAskContext(signal);
+  if (context.fund) state.fund = context.fund;
+  if (context.period) state.period = context.period;
+  if (context.asset_class) state.assetClass = context.asset_class;
+  if (context.manager) state.manager = context.manager;
+  state.ask.context = context;
+  openDrawer("askInsight", signal.id);
 }
 function openDrawer(type, id, mode) { state.drawer = { type, id, mode }; render(); }
 function closeDrawer() { state.drawer = null; render(); }
