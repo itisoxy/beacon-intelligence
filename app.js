@@ -201,7 +201,7 @@ function sidebar() {
       <button class="nav-item ${state.page === "Ask Beacon" ? "active" : ""}" data-page="Ask Beacon">Ask Beacon</button>
     </nav>
     <div class="nav-spacer"></div>
-    <div class="user-card"><div class="avatar">DS</div><div><strong>Demo User</strong><div class="micro">CIO View</div></div></div>
+    <div class="user-card"><div class="avatar">DS</div><div><strong>Demo User</strong></div></div>
   </aside>`;
 }
 function filters() {

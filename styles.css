@@ -1057,16 +1057,112 @@ tr.clickable:hover { background: #f7faff; }
   .story-finding { border-left: 0; border-top: 1px solid var(--line); padding: 20px 0 0; }
 }
 @media (max-width: 680px) {
+  body { overflow-x: hidden; }
+  .sidebar {
+    padding: 14px;
+    gap: 12px;
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .logo {
+    margin-bottom: 0;
+  }
+  .logo-title {
+    font-size: 22px;
+  }
+  .nav {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .nav-item {
+    justify-content: center;
+    text-align: center;
+    padding: 10px 8px;
+    min-height: 44px;
+  }
   .main { padding: 18px 14px 28px; }
-  .top-row { align-items: flex-start; flex-direction: column; }
-  .filter-grid, .summary-strip, .confidence-grid, .value-callouts, .detail-grid { grid-template-columns: 1fr; }
-  .table-scroll { overflow-x: auto; }
+  .top-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .page-title { font-size: 28px; }
+  .date-pill { width: 100%; justify-content: space-between; }
+  .filter-grid, .summary-strip, .confidence-grid, .value-callouts, .detail-grid, .ask-drawer-starters { grid-template-columns: 1fr; }
+  .filter-card select { min-height: 50px; }
+  .chips {
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .chip, .ask-chip { white-space: nowrap; }
+  .panel { padding: 18px; }
+  .hero-value { font-size: 38px; }
+  .metric-row { grid-template-columns: 1fr; }
+  .table-scroll, .ask-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
   table { min-width: 760px; }
   .attention-item { grid-template-columns: 1fr; }
   .research-summary, .research-story { padding: 20px; }
   .signal-selector-row, .drift-path { grid-template-columns: 1fr; }
   .research-bar-row { grid-template-columns: 1fr; }
+  .story-copy h2 { font-size: 25px; }
+  .story-visual { min-width: 0; overflow-x: auto; }
+  .drawer {
+    width: 100vw;
+    padding: 18px;
+  }
+  .drawer-head {
+    align-items: center;
+  }
   .ask-hero h2 { font-size: 38px; }
-  .ask-search, .ask-suggestions, .ask-choice-grid, .ask-metrics { grid-template-columns: 1fr; }
-  .ask-answer { padding: 24px; }
+  .ask-shell {
+    margin-top: 24px;
+    gap: 22px;
+  }
+  .ask-shell.has-answer .ask-hero {
+    margin-left: -14px;
+    margin-right: -14px;
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+  .ask-search, .ask-suggestions, .ask-choice-grid, .ask-metrics, .ask-drawer-form { grid-template-columns: 1fr; }
+  .ask-search input { min-height: 56px; font-size: 16px; }
+  .ask-search button { min-height: 52px; }
+  .ask-answer-wrap { margin-bottom: 44px; }
+  .ask-message,
+  .ask-message.user,
+  .ask-message.beacon {
+    width: 100%;
+    padding: 18px;
+  }
+  .ask-message h3 {
+    font-size: 19px;
+  }
+  .ask-signal-card,
+  .ask-card-panel {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 420px) {
+  .main { padding-left: 10px; padding-right: 10px; }
+  .sidebar { padding: 12px 10px; }
+  .logo-title { font-size: 20px; }
+  .logo-subtitle { font-size: 9px; }
+  .nav-item { font-size: 13px; padding: 9px 6px; }
+  .page-title { font-size: 25px; }
+  .ask-hero h2 { font-size: 32px; }
+  .research-summary h2,
+  .story-copy h2 { font-size: 23px; }
+  .ask-shell.has-answer .ask-hero {
+    margin-left: -10px;
+    margin-right: -10px;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
 }
