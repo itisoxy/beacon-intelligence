@@ -227,6 +227,16 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
     if _has_any(text, "what about managers", "managers?"):
         return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": period, "asset_class": asset_class, "metric": "excess_return", "direction": "ascending", "limit": 5}}
 
+    if explicit_fund and _is_fund_only_request(text, explicit_fund):
+        active_dimension = recent_context.get("active_dimension")
+        if active_dimension == "allocation" and (asset_class or previous_asset):
+            return {"type": "tool", "tool": "get_asset_allocation", "arguments": {"fund": explicit_fund, "period": period, "asset_class": asset_class or previous_asset}}
+        if active_dimension == "manager":
+            return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": explicit_fund, "period": period, "metric": _latest_rank_metric(messages) or "excess_return", "direction": "ascending", "limit": 5}}
+        if active_dimension == "research":
+            return {"type": "tool", "tool": "get_research_signals", "arguments": {"fund": explicit_fund, "period": period, "asset_class": asset_class}}
+        return {"type": "tool", "tool": "get_fund_performance", "arguments": {"fund": explicit_fund, "period": period}}
+
     if _has_any(text, "mgr", "manager") and _has_any(text, "worst", "weakest", "underperform", "q4"):
         return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": explicit_period or period or "Q4", "metric": "excess_return", "direction": "ascending", "limit": 1}}
 
@@ -2578,6 +2588,12 @@ def _is_fund_followup(text: str, fund: str) -> bool:
     cleaned = text.strip().lower().strip(".?!")
     fund_text = fund.lower()
     return cleaned in {fund_text, f"and {fund_text}", f"what about {fund_text}"}
+
+
+def _is_fund_only_request(text: str, fund: str) -> bool:
+    cleaned = text.strip().lower().strip(".?!")
+    fund_text = fund.lower()
+    return cleaned in {f"{fund_text} only", f"only {fund_text}", f"just {fund_text}", f"{fund_text} alone"}
 
 
 def _clean_optional_text(value: Any) -> str | None:
