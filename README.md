@@ -1,14 +1,17 @@
-Beacon Intelligence
+
 Beacon Intelligence is a prototype investment intelligence application built for the Beacon Capital Stewardship assessment.
 My approach to the build was deliberately problem first rather than technology first.
 I tend to work through projects using:
 Problem → Solution → System → Delivery
 So I didn't start by choosing an AI model and then looking for somewhere to use it.
 I started by looking at the funds, the type of user I was designing for, the information they would need and the questions they would realistically want answered.
+
 My approach
+
 1. Start with the fund and the user
 The first thing I looked at was the size and structure of the funds in the supplied data.
 From there I looked at the types of interfaces people working with larger enterprise and institutional portfolios are already familiar with.
+
 The UI was influenced by platforms such as Salesforce, alongside institutional investment platforms such as BlackRock Aladdin.
 I wasn't trying to recreate either product. I wanted Beacon to feel familiar:
 clear navigation
@@ -18,7 +21,9 @@ research surfaced rather than buried
 evidence behind important numbers
 the ability to move from a high-level question into deeper analysis
 I wanted the result to feel closer to an internal investment intelligence product than a dashboard built purely for an assessment.
-2. Use reporting experience to shape the analytics layer
+
+3. Use reporting experience to shape the analytics layer
+   
 I also drew on my previous experience building and pulling reports in Salesforce when deciding how to segment Beacon's analytics layer.
 That experience had already made me used to thinking about reporting through different dimensions, filters and levels of detail rather than treating a dataset as one large table.
 I carried that mindset into Beacon.
@@ -35,7 +40,8 @@ quarterly history
 supporting evidence
 It also influenced the UX.
 Rather than showing everything at once, I wanted the user to be able to start at portfolio level and progressively drill into the part of the data that mattered.
-3. Work backwards from the UX
+
+5. Work backwards from the UX
 I worked backwards from the experience I wanted the user to have.
 Before designing the AI architecture, I thought about the kinds of questions a CIO or investment team would most likely ask.
 For example:
@@ -149,6 +155,7 @@ LLM synthesis
 Ask Beacon response
 ```
 This was useful initially because it allowed me to prove that a natural-language question could trigger a real analytical action.
+
 The agent could:
 ```text
 Understand question
@@ -162,7 +169,8 @@ Understand question
 Decide whether more
 information is required
         ↓
-  Generate answer
+
+ Generate answer
 ```
 The advantage was flexibility.
 The downside was that too much responsibility still sat with the model.
@@ -199,8 +207,9 @@ The important shift was:
 Architecture 1 asked the model to help construct the answer.
 Architecture 2 asks the model to decide what analysis is required while the application constructs the factual answer from validated data.
 That creates a clearer separation of responsibilities.
+
 AI
-```text
+
 Understand question
         ↓
 Resolve conversation context
@@ -258,7 +267,8 @@ Structured response type
 Contextual follow-up
 ```
 The overall architecture is closer to:
-```text
+
+```
                     ┌─────────────────────┐
                     │        USER         │
                     └──────────┬──────────┘
@@ -308,9 +318,13 @@ model/provider swapping
 conversational state
 automated testing
 The model can improve without changing the underlying calculation layer.
+> ...................
 Technology choices
+> .................
 The AI architecture went through several iterations during development.
+
 I initially modelled the agent workflow using LangGraph.
+
 This helped make the individual steps of the agent explicit and gave me a structure for:
 tool calling
 state
@@ -325,7 +339,8 @@ Ollama for local model inference
 Using Ollama locally meant I could build and test the AI workflow without being dependent on an external model provider.
 It also helped expose where the model was useful and where normal application logic was a better solution.
 For example, the preferred flow became:
-```text
+
+``
 User asks question
         ↓
 AI identifies required analysis
@@ -448,7 +463,7 @@ UI
 conversational flows
 Once the main system was working, I connected the repository through Git and deployed the web application through Vercel.
 The development flow became:
-```text
+
 LOCAL DEVELOPMENT
 
 Source files
@@ -491,7 +506,8 @@ Use the snapshot feature much earlier
 One of the biggest things I would change is how I used the snapshot approach described in the assessment prompt while developing locally.
 I understood the supplied data as point-in-time snapshots, but I didn't fully use that feature as part of my development workflow.
 If I started again, I would establish a known-good analytical snapshot almost immediately.
-```text
+
+
 Supplied source snapshot
         ↓
    Validate once
@@ -555,7 +571,7 @@ This is probably the biggest practical development lesson I would take from the 
 Structured result caching
 Another improvement would be caching commonly requested structured results.
 For example:
-```text
+
 fund\_performance | BPT | FY2026
 
 fund\_comparison | BPT | BLE | FY2026
