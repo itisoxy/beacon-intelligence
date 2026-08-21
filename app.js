@@ -9,14 +9,22 @@ const state = {
   managerView: "All Managers",
   drawer: null,
   ask: {
+    threadId: `thread_ui_${globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Date.now()}`,
     query: "",
     result: null,
-    requests: {}
+    messages: [],
+    loading: false,
+    status: "",
+    loadingDots: ".",
+    error: null,
+    context: {}
   }
 };
 
 const $ = (selector) => document.querySelector(selector);
 const app = $("#app");
+let askLoadingDelayTimer = null;
+let askLoadingAnimationTimer = null;
 
 const periods = ["FY2026", "H1 FY2026", "H2 FY2026", "Q1", "Q2", "Q3", "Q4"];
 const qOrder = { Q1: 1, Q2: 2, Q3: 3, Q4: 4 };
@@ -217,7 +225,8 @@ function askContextChips() {
     state.fund !== "All" ? state.fund : null,
     state.period,
     state.assetClass !== "All" ? state.assetClass : null,
-    state.manager !== "All" ? state.manager : null
+    state.manager !== "All" ? state.manager : null,
+    state.ask.context?.research_signal_id ? `Signal ${state.ask.context.research_signal_id}` : null
   ].filter(Boolean);
   return `<div class="ask-context-chips">${items.map(v => `<button class="ask-chip" data-ask-chip="${v}">${v} <span>×</span></button>`).join("")}</div>`;
 }
@@ -226,28 +235,24 @@ function escapeHtml(value) {
 }
 function askBeaconPage() {
   const result = state.ask.result;
-  return `<section class="ask-shell ${result ? "has-answer" : ""}">
+  const hasConversation = state.ask.messages.length || state.ask.loading;
+  return `<section class="ask-shell ${hasConversation ? "has-answer" : ""}">
     <div class="ask-hero">
       <h2>Ask your portfolio.</h2>
       <p>Grounded answers from your FY2026 portfolio data.</p>
       <form class="ask-search" id="askForm">
-        <input id="askInput" value="${escapeHtml(state.ask.query)}" placeholder="Ask about allocation, managers, cash flow, or research signals" autocomplete="off">
-        <button type="submit">Ask</button>
+        <input id="askInput" value="${escapeHtml(state.ask.query)}" placeholder="Ask about allocation, managers, cash flow, or research signals" autocomplete="off" ${state.ask.loading ? "disabled" : ""}>
+        <button type="submit" ${state.ask.loading ? "disabled" : ""}>Ask</button>
       </form>
       ${askContextChips()}
-      ${!result ? askSuggestions() : ""}
+      ${!hasConversation ? askSuggestions() : ""}
     </div>
-    ${result ? askResult(result) : ""}
+    ${hasConversation ? askConversation() : ""}
   </section>`;
 }
 function askSuggestions() {
-  const suggestions = [
-    "What was BLE's Private Equity allocation versus target in Q3?",
-    "Which manager had the weakest benchmark-relative performance in Q4?",
-    "Compare BPT and BLE Private Equity allocation in Q4.",
-    "What are the largest BPT research signals?"
-  ];
-  return `<div class="ask-suggestions">${suggestions.map(q => `<button data-ask-suggestion="${escapeHtml(q)}">${q}</button>`).join("")}</div>`;
+  const suggestions = initialAskSuggestions();
+  return `<div class="ask-suggestions">${suggestions.map(askSuggestionButton).join("")}</div>`;
 }
 function askResult(result) {
   if (result.outcome === "clarify") return askClarification(result);
@@ -255,7 +260,7 @@ function askResult(result) {
   return `<div class="ask-answer-wrap">
     <article class="ask-answer">
       <p class="eyebrow">${result.outcome === "unsupported_causality" ? "Supported limits" : "Answer"}</p>
-      <h3>${result.answer}</h3>
+      ${askAnswerText(result.answer)}
       ${metrics.length ? `<div class="ask-metrics">${metrics.map(askMetricCard).join("")}</div>` : ""}
       ${result.visual ? askVisual(result.visual) : ""}
       <div class="ask-answer-actions">
@@ -266,19 +271,63 @@ function askResult(result) {
     ${askFollowups(result)}
   </div>`;
 }
+function askConversation() {
+  return `<div class="ask-answer-wrap">
+    <div class="ask-thread">
+      ${state.ask.messages.map(askMessage).join("")}
+      ${state.ask.loading && state.ask.status ? `<article class="ask-message beacon ask-loading"><p class="eyebrow">Beacon</p><h3>${escapeHtml(state.ask.status)}<span>${escapeHtml(state.ask.loadingDots)}</span></h3></article>` : ""}
+      ${state.ask.error ? `<article class="ask-message beacon ask-error"><p class="eyebrow">Beacon</p><h3>${escapeHtml(state.ask.error)}</h3></article>` : ""}
+    </div>
+    ${state.ask.result && state.ask.result.outcome !== "clarify" ? askFollowups(state.ask.result) : ""}
+  </div>`;
+}
+function askMessage(message) {
+  if (message.role === "user") {
+    return `<article class="ask-message user"><p class="eyebrow">User</p><h3>${escapeHtml(message.content)}</h3></article>`;
+  }
+  const result = message.result || {};
+  const clarify = result.outcome === "clarify";
+  const metrics = (result.metrics || []).slice(0, 4);
+  return `<article class="ask-message beacon ${clarify ? "ask-clarify" : ""}">
+    <p class="eyebrow">Beacon</p>
+    ${askAnswerText(message.content)}
+    ${metrics.length ? `<div class="ask-metrics">${metrics.map(askMetricCard).join("")}</div>` : ""}
+    ${result.structured_response ? askStructuredResponse(result.structured_response) : ""}
+    ${clarify ? askQuickReplies(message.content, result) : ""}
+    <div class="ask-answer-actions">
+      ${(result.evidence || []).length ? `<button class="text-action" data-ask-drawer="evidence">View evidence</button>` : ""}
+      <button class="text-action" data-ask-drawer="how">How Beacon answered</button>
+    </div>
+  </article>`;
+}
+function askAnswerText(value) {
+  const paragraphs = String(value || "").split(/\n\s*\n/).map(part => part.trim()).filter(Boolean);
+  if (!paragraphs.length) return `<div class="ask-answer-text"></div>`;
+  return `<div class="ask-answer-text">${paragraphs.map(part => `<p>${escapeHtml(part)}</p>`).join("")}</div>`;
+}
+function askQuickReplies(text, result = {}) {
+  const options = result.clarification_options?.length ? result.clarification_options : clarificationSuggestions(text);
+  if (!options.length) return "";
+  return `<div class="ask-choice-grid">${options.map(askSuggestionButton).join("")}</div>`;
+}
 function askClarification(result) {
+  const options = result.options?.length
+    ? result.options.map(option => ({ label: option.label, message: option.reply || option.label }))
+    : clarificationSuggestions(result.question || result.answer);
   return `<div class="ask-answer-wrap">
     <article class="ask-answer ask-clarify">
       <p class="eyebrow">Clarification</p>
       <h3>${result.question || result.answer}</h3>
-      <div class="ask-choice-grid">${(result.options || []).map(option => `<button data-request-id="${result.request_id}" data-clarify-field="${option.field}" data-clarify-value="${option.value}" data-clarify-label="${escapeHtml(option.label)}">${option.label}</button>`).join("")}</div>
+      ${options.length ? `<div class="ask-choice-grid">${options.map(askSuggestionButton).join("")}</div>` : ""}
       <button class="text-action" data-ask-drawer="how">How Beacon answered</button>
     </article>
   </div>`;
 }
 function askMetricCard(metric) {
   const unit = metric.unit || "";
-  const formatted = unit === "USD millions" ? fmtMoney(metric.value) : unit === "percent" ? fmtPct(metric.value, 2) : unit === "percentage points" ? fmtPp(metric.value) : metric.value_text || metric.value;
+  const value = metric.value;
+  const hasBadValue = String(value).toLowerCase() === "nan" || (value !== null && value !== undefined && value !== "" && !Number.isFinite(Number(value)) && typeof value !== "string");
+  const formatted = hasBadValue ? "n/a" : unit === "USD millions" ? fmtMoney(value) : unit === "percent" ? fmtPct(value, 2) : unit === "percentage points" ? fmtPp(value) : metric.value_text || value;
   return `<div class="ask-metric"><span>${metric.label}</span><strong class="${cls(metric.value)}">${formatted}</strong></div>`;
 }
 function askVisual(visual) {
@@ -288,21 +337,396 @@ function askVisual(visual) {
   }
   return "";
 }
+function askStructuredResponse(response) {
+  if (!response?.response_type) return "";
+  const type = response.response_type;
+  if (type === "research_signals") return askResearchSignalCards(response.signals || response.rows || []);
+  if (type === "fund_performance") return askPerformanceCard(response.metrics || response);
+  if (type === "manager_ranking") return askManagerRankingTable(response.rows || []);
+  if (type === "manager_performance") return askManagerPerformanceCard(response.rows || []);
+  if (type === "allocation_drift") return askAllocationDriftTable(response.rows || []);
+  if (type === "allocation_history" || type === "quarterly_trend" || type === "period_comparison") return askQuarterlyTrendTable(response.rows || []);
+  if (type === "fund_comparison") return askFundComparisonCard(response.rows || [], response);
+  if (type === "cash_flow" || type === "cash_flows") return askCashFlowTable(response.rows || [], response.net_cash_flow || response.metrics?.net_cash_flow);
+  if (type === "source_evidence" || type === "source_record") return askSourceEvidenceCard(response);
+  if (type === "clarification") return askQuickReplies(response.question || "", { clarification_options: response.options || [] });
+  if (type === "validation_status") return askValidationCard(response);
+  return "";
+}
+function askResearchSignalCards(signals) {
+  const rows = signals.slice(0, 3);
+  if (!rows.length) return "";
+  return `<div class="ask-structured ask-research-cards">${rows.map((signal, index) => {
+    const normalized = { ...signal, storyNumber: `${index + 1}`.padStart(2, "0") };
+    const checks = (normalized.what_to_check_next || []).slice(0, 3);
+    const metrics = Array.isArray(normalized.supporting_metrics) ? normalized.supporting_metrics.slice(0, 3) : [];
+    return `<section class="ask-signal-card">
+      <p class="eyebrow">Signal ${normalized.storyNumber}</p>
+      <h4>${escapeHtml(normalized.headline || normalized.signal_id || "Research signal")}</h4>
+      ${normalized.observation ? `<p><span class="ask-inline-label">Evidence</span>${escapeHtml(normalized.observation)}</p>` : ""}
+      <div class="source-list"><div><span>${escapeHtml(normalized.primary_metric || "Primary evidence")}</span><strong>${formatResearchValue(normalized)}</strong></div>${metrics.map(metric => `<div><span>${escapeHtml(metric.label || metric.metric_id || "Supporting metric")}</span><strong>${escapeHtml(metric.value_text || metric.value || "")}</strong></div>`).join("")}</div>
+      ${normalized.interpretation ? `<p><span class="ask-inline-label">Interpretation</span>${escapeHtml(normalized.interpretation)}</p>` : ""}
+      ${normalized.why_it_matters ? `<p><span class="ask-inline-label">Why it matters</span>${escapeHtml(normalized.why_it_matters)}</p>` : ""}
+      ${normalized.cio_question ? `<p><span class="ask-inline-label">Question for consideration</span>${escapeHtml(normalized.cio_question)}</p>` : ""}
+      ${checks.length ? `<div><span class="ask-inline-label">What to check next</span><ul class="ask-mini-list">${checks.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    </section>`;
+  }).join("")}</div>`;
+}
+function askPerformanceCard(metrics) {
+  const items = [
+    ["Fund Return", metrics.return_pct || metrics.fund_return_pct],
+    ["Benchmark", metrics.benchmark_pct || metrics.policy_benchmark_return_pct],
+    ["Excess Return", metrics.excess_return_pp],
+    ["Ending AUM", metrics.ending_aum],
+    ["Net Cash Flow", metrics.net_cash_flow],
+    ["Investment Gain / Loss", metrics.investment_gain_loss]
+  ].filter(([, metric]) => metric);
+  return `<section class="ask-structured ask-card-panel">
+    <p class="eyebrow">Fund Performance</p>
+    <div class="ask-metrics">${items.slice(0, 6).map(([label, metric]) => askMetricCard({ label, ...metric })).join("")}</div>
+  </section>`;
+}
+function askManagerRankingTable(rows) {
+  if (!rows.length) return "";
+  return `<div class="ask-structured ask-table-wrap"><table class="research-matrix"><thead><tr><th>Manager</th><th>Fund</th><th>Asset Class</th><th>Return</th><th>Benchmark</th><th>Excess</th><th>Trend</th></tr></thead><tbody>${rows.slice(0, 6).map(row => `<tr><td>${escapeHtml(row.manager || "")}</td><td>${escapeHtml(row.fund || "")}</td><td>${escapeHtml(row.asset_class || "")}</td><td>${formatMetricCell(row.manager_return_pct || row.metric)}</td><td>${formatMetricCell(row.manager_benchmark_return_pct)}</td><td class="${cls(metricCellValue(row.manager_excess_return_pp || row.metric))}">${formatMetricCell(row.manager_excess_return_pp || row.metric)}</td><td>${formatMetricCell(row.quarters_outperforming)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+function askAllocationDriftTable(rows) {
+  if (!rows.length) return "";
+  return `<div class="ask-structured ask-table-wrap"><table class="research-matrix"><thead><tr><th>Asset Class</th><th>Actual</th><th>Policy</th><th>Drift</th><th>Position</th></tr></thead><tbody>${rows.slice(0, 6).map(row => {
+    const metrics = row.metrics || row;
+    const drift = metricCellValue(metrics.allocation_drift_pp || metrics.drift_pp);
+    const position = Number(drift) > 0 ? "Overweight" : Number(drift) < 0 ? "Underweight" : "On target";
+    return `<tr><td>${escapeHtml(row.asset_class || "")}</td><td>${formatMetricCell(metrics.actual_allocation_pct)}</td><td>${formatMetricCell(metrics.policy_target_pct)}</td><td class="${cls(drift)}">${formatMetricCell(metrics.allocation_drift_pp || metrics.drift_pp)}</td><td>${position}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
+}
+function askFundComparisonCard(rows, response = {}) {
+  if (!rows.length) return "";
+  const comparison = response.comparison || {};
+  const delta = comparison.difference ?? comparison.period_b_minus_period_a;
+  if (rows.some(row => row.return_pct || row.benchmark_pct || row.excess_return_pp)) {
+    return `<div class="ask-structured ask-table-wrap"><table class="research-matrix"><thead><tr><th>Fund</th><th>Return</th><th>Benchmark</th><th>Excess</th></tr></thead><tbody>${rows.map(row => `<tr><td>${escapeHtml(row.fund || "")}</td><td>${formatMetricCell(row.return_pct || row.metric)}</td><td>${formatMetricCell(row.benchmark_pct)}</td><td class="${cls(metricCellValue(row.excess_return_pp || row.metric))}">${formatMetricCell(row.excess_return_pp || row.metric)}</td></tr>`).join("")}</tbody></table>${response.summary?.interpretation ? `<p class="micro">${escapeHtml(response.summary.interpretation)}</p>` : ""}</div>`;
+  }
+  return `<section class="ask-structured ask-card-panel">
+    <p class="eyebrow">Fund Comparison</p>
+    <div class="ask-comparison-grid">${rows.map(row => `<div class="ask-comparison-card"><span>${escapeHtml(row.fund || row.period || "")}</span><strong class="${cls(row.metric?.value)}">${formatMetricCell(row.metric)}</strong></div>`).join("")}</div>
+    ${delta !== undefined && delta !== null ? `<p class="micro">Difference: ${formatMetricCell({ value: delta, unit: comparison.unit })}</p>` : ""}
+  </section>`;
+}
+function askQuarterlyTrendTable(rows) {
+  if (!rows.length) return "";
+  return `<div class="ask-structured ask-table-wrap"><table class="research-matrix"><thead><tr><th>Period</th><th>Value</th><th>Benchmark/Target</th><th>Difference</th></tr></thead><tbody>${rows.map(row => {
+    const value = row.actual_allocation_pct || row.manager_return_pct || row.metric;
+    const target = row.policy_target_pct || row.manager_benchmark_return_pct;
+    const diff = row.allocation_drift_pp || row.manager_excess_return_pp;
+    return `<tr><td>${escapeHtml(row.period || row.quarter || "")}</td><td>${formatMetricCell(value)}</td><td>${formatMetricCell(target)}</td><td class="${cls(metricCellValue(diff))}">${formatMetricCell(diff)}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
+}
+function askCashFlowTable(rows, netCashFlow) {
+  return `<div class="ask-structured ask-table-wrap">${netCashFlow ? `<div class="ask-metrics">${askMetricCard({ label: "Net Cash Flow", ...netCashFlow })}</div>` : ""}<table class="research-matrix"><thead><tr><th>Quarter</th><th>Type</th><th>Amount</th></tr></thead><tbody>${rows.slice(0, 8).map(row => `<tr><td>${escapeHtml(row.quarter || "")}</td><td>${escapeHtml(row.flow_type || "")}</td><td>${formatMetricCell(row.amount)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+function askManagerPerformanceCard(rows) {
+  const row = rows[0];
+  if (!row) return "";
+  const items = [
+    ["Manager Return", row.manager_return_pct],
+    ["Benchmark", row.manager_benchmark_return_pct],
+    ["Excess Return", row.manager_excess_return_pp],
+    ["Quarters Outperforming", row.quarters_outperforming]
+  ].filter(([, metric]) => metric);
+  return `<section class="ask-structured ask-card-panel">
+    <p class="eyebrow">${escapeHtml(row.manager || "Manager")}</p>
+    <div class="ask-metrics">${items.map(([label, metric]) => askMetricCard({ label, ...metric })).join("")}</div>
+  </section>`;
+}
+function askSourceEvidenceCard(response) {
+  const record = response.record || response.result?.record || {};
+  const sources = response.sources?.length ? response.sources : [record];
+  return `<section class="ask-structured ask-card-panel">
+    <p class="eyebrow">Source Evidence</p>
+    <div class="source-list">${sources.map((source, index) => askEvidenceSource(source, index)).join("")}</div>
+  </section>`;
+}
+function askValidationCard(response) {
+  const items = [
+    ["Reconciliation Variance", response.reconciliation_variance],
+    ["Allocation Validation", response.allocation_validation_status]
+  ].filter(([, metric]) => metric);
+  return `<section class="ask-structured ask-card-panel">
+    <p class="eyebrow">Validation</p>
+    <div class="ask-metrics">${items.map(([label, metric]) => askMetricCard({ label, ...metric })).join("")}</div>
+  </section>`;
+}
+function metricCellValue(metric) {
+  return metric?.value ?? metric;
+}
+function formatMetricCell(metric) {
+  if (!metric) return "n/a";
+  const value = metric.value ?? metric;
+  const unit = metric.unit || "";
+  if (String(value).toLowerCase() === "nan") return "n/a";
+  if (value !== null && value !== undefined && value !== "" && !Number.isFinite(Number(value)) && typeof value !== "string") return "n/a";
+  if (metric.value_text) return metric.value_text;
+  if (unit === "USD millions") return fmtMoney(value);
+  if (unit === "percent") return fmtPct(value, 2);
+  if (unit === "percentage points") return fmtPp(value);
+  return value ?? "n/a";
+}
 function askFollowups(result) {
-  const followups = result.followups || ["How has this changed?", "Compare with BPT/BLE", "Which managers contributed?", "What happened in H2?"];
-  return `<div class="ask-followups"><p class="eyebrow">Follow-up</p>${followups.map(q => `<button data-ask-suggestion="${escapeHtml(q)}">${q}</button>`).join("")}</div>`;
+  const followups = result.followups || [];
+  if (!followups.length) return "";
+  return `<div class="ask-followups"><p class="eyebrow">Follow-up</p>${followups.map(askSuggestionButton).join("")}</div>`;
 }
-function runAsk(query) {
-  const result = answerAskQuery(query.trim());
-  state.ask = { ...state.ask, query, result };
+function askSuggestionButton(item) {
+  const suggestion = typeof item === "string" ? { label: item, message: item } : item;
+  return `<button data-ask-suggestion="${escapeHtml(suggestion.message || suggestion.label)}">${escapeHtml(suggestion.label || suggestion.message)}</button>`;
+}
+function initialAskSuggestions() {
+  if (state.ask.context?.research_signal_id) {
+    return ["Explain this signal.", "Show the numbers.", "Compare with the other fund.", "What should I investigate next?"];
+  }
+  if (state.manager !== "All") {
+    return [`How did ${state.manager} perform?`, "How consistent were they?", "Show quarterly performance.", "Show the source."];
+  }
+  if (state.assetClass !== "All") {
+    return [`How did ${state.assetClass} do?`, "Allocation versus policy.", "Performance versus benchmark.", `Compare with ${otherFundLabel()}.`];
+  }
+  if (state.fund !== "All") {
+    return [`What was ${state.fund}'s ${state.period} return?`, `What should I investigate about ${state.fund}?`, "Which manager underperformed most?", "How far is Cash from policy?"];
+  }
+  return [
+    "Which fund performed best?",
+    "Which manager had the weakest benchmark-relative performance in Q4?",
+    "Compare BPT and BLE Private Equity allocation in Q4.",
+    "What are the largest BPT research signals?"
+  ];
+}
+function clarificationSuggestions(text) {
+  const lower = String(text || "").toLowerCase();
+  if (lower.includes("absolute return") || lower.includes("relative to benchmark") || lower.includes("versus benchmark") || lower.includes("against benchmark") || lower.includes("consistent")) {
+    return [
+      { label: "Absolute return", message: "Absolute return." },
+      { label: "Relative to benchmark", message: "Relative to benchmark." },
+      { label: "Consistency", message: "Consistency." }
+    ];
+  }
+  if ((lower.includes("performance") || lower.includes("perform")) && lower.includes("allocation") && lower.includes("manager")) {
+    return [
+      { label: "Performance vs benchmark", message: "Performance versus benchmark." },
+      { label: "Allocation vs policy", message: "Allocation versus policy." },
+      { label: "Managers", message: "Managers." },
+      { label: "Give me the full picture", message: "Give me the full picture." }
+    ];
+  }
+  if (lower.includes("bpt") && lower.includes("ble")) {
+    return [
+      { label: "BPT", message: "BPT." },
+      { label: "BLE", message: "BLE." }
+    ];
+  }
+  return [];
+}
+async function runAsk(query) {
+  const message = query.trim();
+  if (!message || state.ask.loading) return;
+  state.ask.messages = [...state.ask.messages, { role: "user", content: message }];
+  state.ask.query = "";
+  state.ask.loading = true;
+  state.ask.status = "";
+  state.ask.loadingDots = ".";
+  state.ask.error = null;
+  startAskLoadingUx(message);
+  render();
+  try {
+    const response = await fetch("/api/ask-beacon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        thread_id: state.ask.threadId,
+        message,
+        application_context: askCurrentContext()
+      })
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error?.message || "Ask Beacon failed.");
+    state.ask.threadId = payload.thread_id || state.ask.threadId;
+    const result = normalizeAskResponse(payload);
+    state.ask.result = result;
+    state.ask.loading = false;
+    clearAskLoadingUx();
+    state.ask.messages = [...state.ask.messages, { role: "assistant", content: "", result }];
+    await typeAskAnswer(result.answer);
+  } catch (error) {
+    state.ask.error = error.message || "Ask Beacon is unavailable.";
+    state.ask.loading = false;
+    clearAskLoadingUx();
+    state.ask.status = "";
+    render();
+  }
+}
+function submitAskMessage(message) {
+  // Prompt chips are shortcuts only; every click re-enters the normal chat path.
+  runAsk(message);
+}
+async function typeAskAnswer(answer) {
+  const index = state.ask.messages.length - 1;
+  const text = String(answer || "");
+  state.ask.status = "";
+  for (let i = 0; i <= text.length; i += 6) {
+    if (!state.ask.messages[index]) return;
+    state.ask.messages[index].content = text.slice(0, i);
+    render();
+    await new Promise(resolve => setTimeout(resolve, 12));
+  }
+  state.ask.messages[index].content = text;
   render();
 }
-function resumeAsk(requestId, selection) {
-  const request = state.ask.requests?.[requestId];
-  if (!request) return;
-  const result = continueAskRequest(request, selection);
-  state.ask.result = result;
-  render();
+function startAskLoadingUx(message) {
+  clearAskLoadingUx();
+  askLoadingDelayTimer = setTimeout(() => {
+    if (!state.ask.loading) return;
+    state.ask.status = "Taking a deeper look at the data";
+    state.ask.loadingDots = ".";
+    render();
+    let tick = 0;
+    askLoadingAnimationTimer = setInterval(() => {
+      if (!state.ask.loading) {
+        clearAskLoadingUx();
+        return;
+      }
+      tick += 1;
+      state.ask.loadingDots = ".".repeat((tick % 3) + 1);
+      render();
+    }, 450);
+  }, 750);
+  void message;
+}
+function clearAskLoadingUx() {
+  if (askLoadingDelayTimer) clearTimeout(askLoadingDelayTimer);
+  if (askLoadingAnimationTimer) clearInterval(askLoadingAnimationTimer);
+  askLoadingDelayTimer = null;
+  askLoadingAnimationTimer = null;
+  state.ask.loadingDots = ".";
+}
+function normalizeAskResponse(payload) {
+  const grounded = payload.grounded_response || {};
+  const answer = grounded.answer || payload.answer || "";
+  const metrics = selectAskMetrics(grounded.metrics || [], answer);
+  const evidence = grounded.sources || payload.turn_sources || [];
+  const events = askEventsFromBackend(payload.turn_tool_events || grounded.activity_events || [], payload.application_context || {});
+  return {
+    outcome: isClarification(answer, payload) ? "clarify" : grounded.validation_errors?.includes("unsupported_causality") ? "unsupported_causality" : "answer",
+    answer,
+    metrics,
+    evidence,
+    events,
+    limitations: grounded.limitations || [],
+    response_type: grounded.response_type || grounded.structured_response?.response_type || null,
+    structured_response: grounded.structured_response || null,
+    followups: grounded.followups?.length ? grounded.followups : askFollowupQuestions(answer, payload),
+    clarification_options: grounded.clarification_options || [],
+    debug_state: grounded
+  };
+}
+function isClarification(answer, payload) {
+  const toolEvents = payload.turn_tool_events || [];
+  const text = String(answer || "").toLowerCase();
+  return !toolEvents.some(event => event.event === "tool_selected") && text.endsWith("?") && (text.includes("do you mean") || text.includes("which") || text.includes("should i") || text.includes("what"));
+}
+function selectAskMetrics(metrics, answer) {
+  const ids = new Set();
+  const text = String(answer || "").toLowerCase();
+  if (text.includes("manager") || text.includes("benchmark-relative")) ["manager_return_pct", "manager_benchmark_return_pct", "manager_excess_return_pp", "manager_consistency"].forEach(id => ids.add(id));
+  if (text.includes("allocation") || text.includes("policy") || text.includes("drift")) ["actual_allocation_pct", "policy_target_pct", "allocation_drift_pp", "dollar_variance_to_policy"].forEach(id => ids.add(id));
+  if (text.includes("fund") || text.includes("returned")) ["fund_return_pct", "policy_benchmark_return_pct", "fund_excess_return_pp", "ending_aum"].forEach(id => ids.add(id));
+  const selected = metrics.filter(metric => ids.has(metric.metric_id)).slice(0, 4);
+  return (selected.length ? selected : metrics.slice(0, 3)).map(metric => ({
+    label: askMetricLabel(metric.metric_id),
+    record_id: metric.record_id,
+    metric_id: metric.metric_id,
+    value: metric.value,
+    value_text: metric.value_text,
+    unit: metric.unit,
+    provenance: metric.provenance || []
+  }));
+}
+function askMetricLabel(metricId) {
+  const labels = {
+    ending_aum: "Ending AUM",
+    fund_return_pct: "Fund Return",
+    policy_benchmark_return_pct: "Benchmark",
+    fund_excess_return_pp: "Excess Return",
+    actual_allocation_pct: "Actual Allocation",
+    policy_target_pct: "Policy Target",
+    allocation_drift_pp: "Drift",
+    dollar_variance_to_policy: "Value vs Policy",
+    manager_return_pct: "Manager Return",
+    manager_benchmark_return_pct: "Benchmark",
+    manager_excess_return_pp: "Excess Return",
+    manager_consistency: "Consistency",
+    net_cash_flow: "Net Cash Flow",
+    reconciliation_variance: "Reconciliation Variance",
+    allocation_validation_status: "Allocation Status"
+  };
+  return labels[metricId] || humanLabel(metricId || "Metric");
+}
+function askEventsFromBackend(events, context) {
+  const rows = [];
+  if (context && Object.values(context).some(Boolean)) rows.push({ event: "context_used", label: `Used ${askContextSummary(context)} context` });
+  events.forEach(event => {
+    if (event.event === "tool_selected") rows.push({ event: event.event, label: toolSelectedLabel(event.tool, event.arguments || {}) });
+    if (event.event === "tool_completed" && event.ok) {
+      rows.push({ event: event.event, label: (event.record_ids || []).length ? "Verified source record" : "Completed Beacon tool" });
+    }
+  });
+  return rows;
+}
+function askContextSummary(context) {
+  return [context.fund, context.period, context.asset_class, context.manager].filter(Boolean).join(" / ");
+}
+function toolSelectedLabel(tool, args) {
+  const labels = {
+    get_fund_performance: `Queried ${args.fund || "fund"} performance`,
+    get_asset_allocation: `Queried ${args.asset_class || "asset"} allocation`,
+    get_allocation_history: `Compared ${args.asset_class || "asset"} allocation history`,
+    rank_asset_allocations: "Ranked allocation drift",
+    get_manager_performance: "Queried manager performance",
+    rank_managers: `Ranked managers by ${String(args.metric || "metric").replaceAll("_", " ")}`,
+    get_manager_history: "Queried manager history",
+    get_cash_flows: "Queried cash flows",
+    get_research_signals: "Reviewed research signals",
+    compare_funds: "Compared funds",
+    compare_periods: "Compared periods",
+    validate_reconciliation: "Validated reconciliation",
+    get_source_record: "Retrieved source record"
+  };
+  return labels[tool] || humanLabel(tool || "Tool selected");
+}
+function askFollowupQuestions(answer, payload) {
+  const kind = askResponseKind(answer, payload);
+  const tools = new Set((payload.turn_tool_events || []).filter(event => event.event === "tool_selected").map(event => event.tool));
+  if (isClarification(answer, payload)) return [];
+  if (kind === "manager") return ["Show quarterly history", "Compare next worst", `And ${otherFundLabel()}?`, "Source"];
+  if (kind === "allocation") return ["Has this worsened?", "Show quarterly trend", `Compare with ${otherFundLabel()}`, "Source"];
+  if (tools.has("compare_funds")) return ["Relative to benchmark", "Show quarterly trend", "Compare allocation", "Source"];
+  if (kind === "fund") return [`Compare with ${otherFundLabel()}.`, "How did it do versus benchmark?", "What changed in H2?", "Show the source."];
+  if (kind === "research") return ["Explain the top signal", "Show the numbers", "What about managers?", `Compare with ${otherFundLabel()}`, "Source"];
+  return ["Source", "What should I investigate next?"];
+}
+function askResponseKind(answer, payload) {
+  const text = String(answer || "").toLowerCase();
+  const metrics = payload.grounded_response?.metrics || [];
+  const metricIds = new Set(metrics.map(metric => metric.metric_id));
+  const tools = new Set((payload.turn_tool_events || []).filter(event => event.event === "tool_selected").map(event => event.tool));
+  if (tools.has("get_research_signals") || text.includes("research signal") || text.includes("investigate")) return "research";
+  if (tools.has("rank_managers") || tools.has("get_manager_performance") || tools.has("get_manager_history") || [...metricIds].some(id => String(id).startsWith("manager_")) || text.includes("manager")) return "manager";
+  if (tools.has("get_asset_allocation") || tools.has("get_allocation_history") || tools.has("rank_asset_allocations") || metricIds.has("allocation_drift_pp") || metricIds.has("actual_allocation_pct") || text.includes("allocation") || text.includes("policy") || text.includes("drift")) return "allocation";
+  if (tools.has("get_fund_performance") || tools.has("rank_funds") || tools.has("compare_funds") || metricIds.has("fund_return_pct") || metricIds.has("fund_excess_return_pp") || text.includes("fund") || text.includes("return")) return "fund";
+  return "general";
+}
+function otherFundLabel() {
+  if (state.fund === "BPT") return "BLE";
+  if (state.fund === "BLE") return "BPT";
+  return "the other fund";
 }
 function askMetric(metric_id, filters) {
   return metricRow(metric_id, filters) || null;
@@ -321,7 +745,7 @@ function askMetricObj(label, row) {
 function askProvenance(row) {
   const cells = row.source_cells;
   return {
-    source_record_ids: row.source_record_ids || (row.source_record_id ? [row.source_record_id] : []),
+    source_record_ids: row.source_record_ids || (row.source_record_id ? [row.source_record_id] : (row.record_id ? [row.record_id] : [])),
     source_files: row.source_files || (row.source_file ? [row.source_file] : []),
     source_sheets: row.source_sheets || (row.source_sheet ? [row.source_sheet] : []),
     source_rows: row.source_rows || (row.source_row ? [row.source_row] : []),
@@ -331,202 +755,15 @@ function askProvenance(row) {
 function makeAskResult({ answer, metrics = [], evidence = [], events = [], visual = null, followups = [], outcome = "answer", debug_state = null }) {
   return { outcome, answer, metrics, evidence, events, visual, followups, debug_state };
 }
-function answerAskQuery(query) {
-  const q = query.toLowerCase();
-  if (!query) return clarifyAsk("What would you like to ask?", ["Review BPT this year", "Compare BPT and BLE", "Show Private Equity allocation"]);
-  if (q.includes("which manager") && (q.includes("best") || q.includes("strongest") || q.includes("performed best"))) {
-    return createBestManagerClarification(query);
-  }
-  if (q.includes("how did private equity do") || q.includes("how has private equity done")) {
-    return clarifyAsk("What would you like to review for Private Equity?", ["Performance vs benchmark", "Allocation vs policy", "Underlying managers", "Full review"]);
-  }
-  if (q.includes("strategy")) {
-    return makeAskResult({
-      outcome: "out_of_scope",
-      answer: "The supplied dataset cannot establish why an investment strategy changed. I can analyse performance, compare with benchmark, or show the quarterly trend.",
-      events: [{ event: "out_of_scope", label: "Strategy-change data unavailable" }],
-      followups: ["Analyse manager performance", "Compare with benchmark", "Show quarterly trend"]
-    });
-  }
-  if (q.includes("private equity") && q.includes("ble") && q.includes("q3")) return askBlePeQ3();
-  if (q.includes("weakest") || q.includes("lowest excess") || q.includes("largest detractor")) return askWeakestManagerQ4();
-  if (q.includes("compare") && q.includes("private equity")) return askComparePrivateEquity(q.includes("q4") ? "Q4" : state.period);
-  if (q.includes("cash") && q.includes("q3") && q.includes("q4")) return askCashQ3Q4();
-  if (q.includes("research") && q.includes("bpt")) return askResearchBpt();
-  if (q.includes("why did this move") && state.assetClass !== "All") return askThisMove();
-  return clarifyAsk("I can answer that, but I need one more detail.", ["Performance vs benchmark", "Allocation vs policy", "Manager ranking", "Research signals"]);
-}
-function clarifyAsk(answer, labels) {
-  return {
-    outcome: "clarify",
-    answer,
-    options: labels.map(label => ({ label, query: label.includes("Allocation") ? `${state.assetClass === "All" ? "Private Equity" : state.assetClass} allocation vs policy for ${state.fund} ${state.period}` : label })),
-    events: [{ event: "clarification_requested", label: "Asked for a decision that materially changes the answer" }]
-  };
-}
-function createRequestId() {
-  return `req_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-}
-function createBestManagerClarification(query) {
-  const requestId = createRequestId();
-  const request = {
-    request_id: requestId,
-    original_query: query,
-    status: "waiting_for_clarification",
-    context: askCurrentContext(),
-    intent: "manager_ranking",
-    ambiguity: { field: "ranking_metric" },
-    debug: []
-  };
-  request.debug.push({ request_id: requestId, original_query: query, status: "received" });
-  request.debug.push({ request_id: requestId, original_query: query, status: "interpreting", resolved_context: request.context, intent: request.intent, ambiguities: request.ambiguity });
-  request.debug.push({ request_id: requestId, original_query: query, status: "waiting_for_clarification", missing: "ranking_metric" });
-  state.ask.requests[requestId] = request;
-  return {
-    outcome: "clarify",
-    type: "clarification",
-    request_id: requestId,
-    question: "How should I measure best performance?",
-    answer: "How should I measure best performance?",
-    options: [
-      { label: "Highest absolute return", field: "ranking_metric", value: "manager_return_pct" },
-      { label: "Highest return vs benchmark", field: "ranking_metric", value: "manager_excess_return_pp" },
-      { label: "Most consistent outperformer", field: "ranking_metric", value: "manager_consistency" }
-    ],
-    events: [{ event: "clarification_requested", label: "Asked how to measure best performance" }],
-    debug_state: request
-  };
-}
 function askCurrentContext() {
   return {
-    fund: state.fund === "All" ? "All" : state.fund,
+    fund: state.fund === "All" ? null : state.fund,
     period: state.period,
     asset_class: state.assetClass === "All" ? null : state.assetClass,
     manager: state.manager === "All" ? null : state.manager,
-    source_page: "ask"
+    source_page: state.ask.context?.source_page || "ask",
+    research_signal_id: state.ask.context?.research_signal_id || null
   };
-}
-function continueAskRequest(request, selection) {
-  request.clarification = selection;
-  request.status = "ready";
-  request.debug.push({ request_id: request.request_id, original_query: request.original_query, status: "clarification_received", [selection.field]: selection.value });
-  request.debug.push({ request_id: request.request_id, original_query: request.original_query, status: "ready" });
-  if (request.intent === "manager_ranking" && selection.field === "ranking_metric") {
-    return answerBestManagerFromRequest(request, selection.value);
-  }
-  return makeAskResult({
-    outcome: "out_of_scope",
-    answer: "I could not resume that request because the clarification did not match a supported intent.",
-    events: askEvents(["Validation Failed"])
-  });
-}
-function answerBestManagerFromRequest(request, rankingMetric) {
-  const fund = request.context.fund || "All";
-  const period = request.context.period || "FY2026";
-  const rows = (data.metric_values || [])
-    .filter(r => r.metric_id === rankingMetric && r.period === period && r.manager_name && (fund === "All" || r.fund_id === fund))
-    .sort((a, b) => Number(b.value || 0) - Number(a.value || 0));
-  request.debug.push({ request_id: request.request_id, original_query: request.original_query, status: "tool_running", tool_selected: "rank_managers", tool_arguments: { fund, period, metric: rankingMetric, direction: "desc", limit: 1 } });
-  const top = rows[0];
-  request.debug.push({ request_id: request.request_id, original_query: request.original_query, status: "tool_complete", tool_result_record_ids: top ? [top.metric_value_id] : [] });
-  if (!top) {
-    request.debug.push({ request_id: request.request_id, original_query: request.original_query, status: "validation_failed", validation_result: "no_data" });
-    return makeAskResult({ outcome: "out_of_scope", answer: "No manager ranking records matched the preserved request context.", events: askEvents(["Validation Failed"]) });
-  }
-  const ret = askMetric("manager_return_pct", { fund_id: top.fund_id, period, asset_class: top.asset_class, manager_name: top.manager_name });
-  const bench = askMetric("manager_benchmark_return_pct", { fund_id: top.fund_id, period, asset_class: top.asset_class, manager_name: top.manager_name });
-  const excess = askMetric("manager_excess_return_pp", { fund_id: top.fund_id, period, asset_class: top.asset_class, manager_name: top.manager_name });
-  const consistency = askMetric("manager_consistency", { fund_id: top.fund_id, period, asset_class: top.asset_class, manager_name: top.manager_name });
-  request.debug.push({ request_id: request.request_id, original_query: request.original_query, status: "tool_running", tool_selected: "get_manager_performance", tool_arguments: { manager: top.manager_name, fund: top.fund_id, period, asset_class: top.asset_class } });
-  request.debug.push({ request_id: request.request_id, original_query: request.original_query, status: "tool_complete", tool_result_record_ids: [ret, bench, excess, consistency].filter(Boolean).map(r => r.metric_value_id) });
-  const valid = Boolean(ret && bench && excess && askProvenance(excess).source_record_ids.length);
-  request.debug.push({ request_id: request.request_id, original_query: request.original_query, status: valid ? "validated" : "validation_failed", validation_result: { ok: valid } });
-  request.status = valid ? "answered" : "failed";
-  request.debug.push({ request_id: request.request_id, original_query: request.original_query, status: request.status, final_response_status: request.status });
-  const label = rankingMetric === "manager_return_pct" ? "highest absolute return" : rankingMetric === "manager_consistency" ? "most consistent outperformance" : "strongest benchmark-relative performance";
-  return makeAskResult({
-    answer: `${top.manager_name} had the ${label} for ${top.fund_id} in ${period}. It returned ${fmtPct(ret?.value, 2)} against a benchmark of ${fmtPct(bench?.value, 2)}, with excess return of ${fmtPp(excess?.value)}.`,
-    metrics: [askMetricObj("Manager return", ret), askMetricObj("Benchmark return", bench), askMetricObj("Excess return", excess), askMetricObj("Quarters outperforming", consistency)],
-    evidence: [ret, bench, excess, consistency].filter(Boolean),
-    events: askEvents([`Used ${top.fund_id} / ${period} context`, "Queried manager performance", "Compared associated benchmarks", `Ranked managers by ${rankingMetric}`, "Verified source record"]),
-    followups: ["Show the manager history", "Compare with benchmark", "What happened in H2?"],
-    outcome: "answer",
-    debug_state: request
-  });
-}
-function askBlePeQ3() {
-  const actual = askMetric("actual_allocation_pct", { fund_id: "BLE", period: "Q3", asset_class: "Private Equity" });
-  const target = askMetric("policy_target_pct", { fund_id: "BLE", period: "Q3", asset_class: "Private Equity" });
-  const drift = askMetric("allocation_drift_pp", { fund_id: "BLE", period: "Q3", asset_class: "Private Equity" });
-  const variance = askMetric("dollar_variance_to_policy", { fund_id: "BLE", period: "Q3", asset_class: "Private Equity" });
-  return makeAskResult({
-    answer: `BLE Private Equity was ${fmtPct(actual?.value, 2)} versus a ${fmtPct(target?.value, 2)} policy target in Q3, a ${fmtPp(drift?.value)} drift.`,
-    metrics: [askMetricObj("Actual", actual), askMetricObj("Policy", target), askMetricObj("Drift", drift), askMetricObj("Dollar variance", variance)],
-    evidence: [actual, target, drift, variance].filter(Boolean),
-    events: askEvents(["Identified BLE", "Identified Q3", "Queried Asset Allocation", "Retrieved Policy Target", "Calculated Drift", "Verified Source"]),
-    followups: ["How has this changed?", "Compare with BPT", "Which managers contributed?", "What happened in H2?"]
-  });
-}
-function askWeakestManagerQ4() {
-  const rows = (data.metric_values || []).filter(r => r.metric_id === "manager_excess_return_pp" && r.period === "Q4" && r.manager_name).sort((a, b) => Number(a.value) - Number(b.value));
-  const row = rows[0];
-  return makeAskResult({
-    answer: `${row.manager_name} had the weakest benchmark-relative performance in Q4 at ${fmtPp(row.value)}.`,
-    metrics: [askMetricObj("Excess return", row)],
-    evidence: [row],
-    events: askEvents(["Identified Q4", "Queried Manager Performance", "Ranked Excess Return", "Verified Source"]),
-    followups: ["Show the manager history", "Compare with other Public Equity managers", "What happened in H2?"]
-  });
-}
-function askComparePrivateEquity(period) {
-  const bpt = askMetric("allocation_drift_pp", { fund_id: "BPT", period, asset_class: "Private Equity" });
-  const ble = askMetric("allocation_drift_pp", { fund_id: "BLE", period, asset_class: "Private Equity" });
-  return makeAskResult({
-    answer: `In ${period}, BPT Private Equity drift was ${fmtPp(bpt?.value)} versus BLE at ${fmtPp(ble?.value)}.`,
-    metrics: [askMetricObj("BPT drift", bpt), askMetricObj("BLE drift", ble)],
-    evidence: [bpt, ble].filter(Boolean),
-    visual: { type: "period-bars", items: [{ label: "BPT", value: bpt?.value || 0 }, { label: "BLE", value: ble?.value || 0 }] },
-    events: askEvents(["Identified Private Equity", `Identified ${period}`, "Compared Funds", "Calculated Difference", "Verified Source"]),
-    followups: ["How has this changed?", "Which managers contributed?", "Show Q1 to Q4 trend"]
-  });
-}
-function askCashQ3Q4() {
-  const q3 = askMetric("allocation_drift_pp", { fund_id: "BPT", period: "Q3", asset_class: "Cash" });
-  const q4 = askMetric("allocation_drift_pp", { fund_id: "BPT", period: "Q4", asset_class: "Cash" });
-  const change = Number(q4?.value || 0) - Number(q3?.value || 0);
-  return makeAskResult({
-    answer: `BPT Cash allocation drift moved from ${fmtPp(q3?.value)} in Q3 to ${fmtPp(q4?.value)} in Q4, a ${fmtPp(change)} change.`,
-    metrics: [askMetricObj("Q3 drift", q3), askMetricObj("Q4 drift", q4), { label: "Change", value: change, unit: "percentage points", provenance: {} }],
-    evidence: [q3, q4].filter(Boolean),
-    visual: { type: "period-bars", items: [{ label: "Q3", value: q3?.value || 0 }, { label: "Q4", value: q4?.value || 0 }] },
-    events: askEvents(["Identified BPT", "Identified Cash", "Retrieved Q3", "Retrieved Q4", "Calculated Change", "Verified Source"]),
-    followups: ["Compare with BLE Cash", "What happened in H2?", "Show cash flows"]
-  });
-}
-function askResearchBpt() {
-  const signals = (data.research?.horizons?.FY2026?.candidates || []).filter(s => s.fund === "BPT").slice(0, 3);
-  return makeAskResult({
-    answer: signals.length ? `The largest BPT research signals are ${signals.map(s => s.headline).join(" ")}.` : "No BPT research signals matched the current scope.",
-    metrics: signals.slice(0, 2).map(s => ({ label: s.primary_metric, value: s.primary_value, unit: String(s.primary_metric).toLowerCase().includes("drift") ? "percentage points" : "", provenance: askProvenance(s) })),
-    evidence: signals,
-    events: askEvents(["Identified BPT", "Queried Research Signals", "Ranked Research Signals", "Verified Source"]),
-    followups: ["Open the top signal", "Compare with BLE", "What happened in H2?"]
-  });
-}
-function askThisMove() {
-  const asset = state.assetClass;
-  const hist = sourcePeriods.map(period => askMetric("allocation_drift_pp", { fund_id: state.fund, period, asset_class: asset })).filter(Boolean);
-  return makeAskResult({
-    answer: `${state.fund} ${asset} moved based on observed allocation drift across FY2026. This describes the trend, not causality.`,
-    metrics: hist.slice(-2).map(r => askMetricObj(r.period, r)),
-    evidence: hist,
-    visual: { type: "period-bars", items: hist.map(r => ({ label: r.period, value: r.value })) },
-    events: askEvents([`Identified ${state.fund}`, `Identified ${asset}`, "Used Page Context", "Retrieved Allocation History", "Verified Source"]),
-    followups: ["Compare with BLE", "Which managers contributed?", "What happened in H2?"]
-  });
-}
-function askEvents(labels) {
-  return labels.map(label => ({ event: label.toLowerCase().replaceAll(" ", "_"), label }));
 }
 function hero(s, qoq) {
   const endingAum = fundMetric("ending_aum") ?? s.EndingMarketValue;
@@ -574,7 +811,7 @@ function movement(s, qoq) {
     </section>
     <section class="panel section">
       <div class="section-title"><div><h2>CIO Attention</h2><p class="subtitle">Data-backed exceptions</p></div></div>
-      <div class="attention-list">${attentionItems().map((i, idx) => `<button class="attention-item" data-attention="${idx}"><span class="priority ${i.priority === "High" ? "negative" : i.priority === "Medium" ? "amber" : ""}">${i.priority}</span><span><strong>${i.title}</strong><br><span class="micro">${i.detail}</span></span><span class="right positive">View â†’</span></button>`).join("")}</div>
+      <div class="attention-list">${attentionItems().map((i, idx) => `<button class="attention-item" data-attention="${idx}"><span class="priority ${i.priority === "High" ? "negative" : i.priority === "Medium" ? "amber" : ""}">${i.priority}</span><span><strong>${i.title}</strong><br><span class="micro">${i.detail}</span></span><span class="right positive">View &rarr;</span></button>`).join("")}</div>
     </section>
   </div>`;
 }
@@ -582,7 +819,7 @@ function allocationSection() {
   const rows = driftRows();
   return `<section class="panel section table-section">
     <div class="section-title"><div><h2>Where are we drifting?</h2><p class="subtitle">Asset Allocation vs Policy</p></div></div>
-    ${rows.length ? `<div class="table-scroll"><table><thead><tr><th>Asset Class</th><th class="right">Market Value</th><th class="right">Actual</th><th class="right">Policy</th><th class="right">Drift</th><th class="right">$ Variance</th><th>Q1 â†’ Q4</th><th>Status</th></tr></thead><tbody>
+    ${rows.length ? `<div class="table-scroll"><table><thead><tr><th>Asset Class</th><th class="right">Market Value</th><th class="right">Actual</th><th class="right">Policy</th><th class="right">Drift</th><th class="right">$ Variance</th><th>Q1 &rarr; Q4</th><th>Status</th></tr></thead><tbody>
       ${rows.map(r => `<tr class="clickable" data-asset="${r.AssetClassLevel1}"><td><strong>${r.AssetClassLevel1}</strong></td><td class="right">${fmtMoney(r.EndingMarketValue)}</td><td class="right">${fmtPct(r.PctOfFundTotal, 2)}</td><td class="right">${fmtPct(r.PolicyTargetPct, 2)}</td><td class="right ${cls(r.VarianceToTargetPct)}">${fmtPp(r.VarianceToTargetPct)}</td><td class="right ${cls(r.DollarVariance)}">${fmtMoney(r.DollarVariance)}</td><td>${spark(trendForAsset(r.AssetClassLevel1))}</td><td>${Math.abs(r.VarianceToTargetPct) < .75 ? "Near policy" : r.VarianceToTargetPct > 0 ? "Overweight" : "Underweight"}</td></tr>`).join("")}
     </tbody></table></div>` : `<div class="empty">No allocation records match these filters.</div>`}
   </section>`;
@@ -685,10 +922,14 @@ function researchStory(signal) {
     <div class="story-grid">
       <div class="story-copy">
         <h2>${signal.headline}</h2>
-        <p>${signal.observation}</p>
+        <div class="insight-inference">
+          <p><span>Fact</span>${escapeHtml(signal.observation || "Canonical evidence is available in the supporting table.")}</p>
+          <p><span>What this suggests</span>${escapeHtml(insightSuggestionText(signal))}</p>
+          ${insightBulletList("Possible explanations", signal.possible_explanations)}
+        </div>
         <div class="story-actions">
           <button class="text-action" data-evidence="${signal.id}">View evidence</button>
-          <button class="text-action" data-analysis="${signal.id}">View full analysis â†’</button>
+          <button class="text-action" data-analysis="${signal.id}">View full analysis</button>
         </div>
       </div>
       <div class="story-visual">${researchVisual(signal)}</div>
@@ -697,16 +938,30 @@ function researchStory(signal) {
         <strong>${signal.primary_metric}: ${formatResearchValue(signal)}</strong>
         <p class="eyebrow matter-label">Why it matters</p>
         <p>${signal.why_it_matters}</p>
+        ${signal.cio_question ? `<p class="eyebrow matter-label">Question for consideration</p><p>${signal.cio_question}</p>` : ""}
+        ${insightBulletList("What to check next", signal.what_to_check_next)}
       </div>
-      <button class="sparkle-action" title="Explore with Beacon" aria-label="Explore this insight with Beacon" data-beacon-context="${signal.id}">âœ¦</button>
+      <button class="sparkle-action" title="Explore with Beacon" aria-label="Explore this insight with Beacon" data-beacon-context="${signal.id}">&#10022;</button>
     </div>
   </article>`;
 }
+function insightSuggestionText(signal) {
+  if (signal.type === "cash_flow") {
+    return "No liquidity problem is detected from the supplied data. The cash-flow pattern does suggest paying closer attention to liquidity monitoring and potential rebalancing needs.";
+  }
+  return signal.interpretation || "Beacon has not identified a supported inference for this signal.";
+}
+function insightBulletList(label, items = []) {
+  const bullets = (items || []).filter(Boolean).slice(0, 4);
+  if (!bullets.length) return "";
+  return `<div class="insight-bullets"><span>${escapeHtml(label)}</span><ul>${bullets.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>`;
+}
 function formatResearchValue(signal) {
   const v = Number(signal.primary_value);
-  if (!Number.isFinite(v)) return signal.primary_value;
-  if (signal.primary_metric.toLowerCase().includes("aum") || signal.primary_metric.toLowerCase().includes("flow")) return fmtMoney(v);
-  if (signal.primary_metric.toLowerCase().includes("quarter")) return `${v}`;
+  if (!Number.isFinite(v)) return signal.primary_value === undefined || signal.primary_value === null ? "Unavailable" : escapeHtml(signal.primary_value);
+  const metric = String(signal.primary_metric || "").toLowerCase();
+  if (metric.includes("aum") || metric.includes("flow")) return fmtMoney(v);
+  if (metric.includes("quarter")) return `${v}`;
   return fmtPp(v);
 }
 function researchVisual(signal) {
@@ -775,10 +1030,11 @@ function formatAskEvidenceValue(metric) {
   return `${value} · ${metric.unit || "value"}`;
 }
 function askEvidenceSource(row, index) {
-  const p = askProvenance(row || {});
+  const p = Array.isArray(row.provenance) ? askProvenance(row.provenance[0] || {}) : askProvenance(row || {});
+  const recordId = row.record_id || row.source_record_id || p.source_record_ids?.[0] || `Evidence ${index + 1}`;
   return `<div>
-    <span>${row.metric_id || row.type || row.source_record_id || `Evidence ${index + 1}`}</span>
-    <strong>${(p.source_files || []).join(", ") || "Workbook"} · ${(p.source_sheets || []).join(", ") || "Sheet"} · rows ${(p.source_rows || []).join(", ") || "n/a"} · ${(p.source_cells || []).join(", ") || "cells n/a"}</strong>
+    <span>${recordId}</span>
+    <strong>Workbook ${(p.source_files || []).join(", ") || "n/a"} · Sheet ${(p.source_sheets || []).join(", ") || "n/a"} · Row ${(p.source_rows || []).join(", ") || "n/a"} · Cells ${(p.source_cells || []).join(", ") || "n/a"}</strong>
   </div>`;
 }
 function findSignal(id) {
@@ -962,7 +1218,7 @@ function relatedAnalysis(signal) {
   return `<div class="related-analysis">
     <p class="subtitle">${intro}</p>
     ${rows.map((row, index) => relatedAnalysisCard(row, signal, index, rows)).join("")}
-    ${showAll ? `<button class="text-action source-record-action">View all allocation differences â†’</button>` : ""}
+    ${showAll ? `<button class="text-action source-record-action">View all allocation differences &rarr;</button>` : ""}
   </div>`;
 }
 function evidenceDrawer(id, mode = "evidence") {
@@ -985,6 +1241,7 @@ function evidenceDrawer(id, mode = "evidence") {
     <h3 style="margin-top:18px">Source</h3>
     <div class="source-list">${(signal.source_record_ids || []).slice(0, 8).map((id, i) => `<div><span>${id}</span><strong>${signal.source_files?.[0] || ""} Â· ${signal.source_sheets?.join(", ") || ""} Â· rows ${(signal.source_rows || []).slice(0,4).join(", ")}</strong></div>`).join("")}</div>
     <button class="text-action source-record-action">View source record</button>
+    <button class="ask-placeholder" data-page="Ask Beacon" data-ask-context='${escapeHtml(JSON.stringify({ fund: signal.fund, period: signal.period, asset_class: signal.asset_class, manager: signal.manager, research_signal_id: signal.id }))}'>Ask Beacon</button>
     <h3 style="margin-top:18px">Limitation</h3><p>${signal.limitations}</p>`;
 }
 function assetDrawer(assetClass) {
@@ -1000,7 +1257,7 @@ function assetDrawer(assetClass) {
     <h3>Allocation History</h3><p>${sourcePeriods.map((q, i) => `${q}: ${fmtPct(trendForAsset(assetClass)[i], 2)}`).join(" Â· ")}</p>
     <h3 style="margin-top:18px">Performance</h3><p>Return ${fmtPct(row?.FYTDReturnPct, 2)} Â· Benchmark ${fmtPct(row?.BenchmarkFYTDReturnPct, 2)} Â· <span class="${cls(row?.ExcessFYTDReturnBps)}">${fmtPp(Number(row?.ExcessFYTDReturnBps || 0) / 100)}</span></p>
     <h3 style="margin-top:18px">Underlying Managers</h3><ul>${managers.map(m => `<li>${m.ManagerName} Â· ${fmtMoney(m.MarketValue)}</li>`).join("")}</ul>
-    <button class="ask-placeholder" data-page="Ask Beacon">Ask Beacon</button>`;
+    <button class="ask-placeholder" data-page="Ask Beacon" data-ask-context='${escapeHtml(JSON.stringify({ asset_class: assetClass }))}'>Ask Beacon</button>`;
 }
 function managerDrawer(manager) {
   const row = managerRows().find(m => m.ManagerName === manager) || data.records.manager_detail.find(m => m.ManagerName === manager);
@@ -1020,7 +1277,7 @@ function managerDrawer(manager) {
       return `${q}: ${r && a ? fmtPp(Number(r.QTDReturnPct) - Number(a.BenchmarkQTDReturnPct)) : "n/a"}`;
     }).join(" Â· ")}</p>
     <h3 style="margin-top:18px">Source Reference</h3><p class="micro">${provenance.source_file} Â· ${provenance.source_sheet} Â· row ${provenance.source_row} Â· ${row?.source_record_id || ""}</p>
-    <button class="ask-placeholder" data-page="Ask Beacon">Ask Beacon</button>`;
+    <button class="ask-placeholder" data-page="Ask Beacon" data-ask-context='${escapeHtml(JSON.stringify({ fund: row?.FundCode, asset_class: row?.AssetClassLevel1, manager }))}'>Ask Beacon</button>`;
 }
 function bindEvents() {
   if ($("#fund")) {
@@ -1028,9 +1285,8 @@ function bindEvents() {
     ["fund", "period", "assetClass", "manager"].forEach(id => $(`#${id}`).addEventListener("change", e => { state[id] = e.target.value; render(); }));
     $("#reset").addEventListener("click", () => { Object.assign(state, { fund: "BPT", period: "FY2026", assetClass: "All", manager: "All", managerView: "All Managers", drawer: null }); render(); });
   }
-  if ($("#askForm")) $("#askForm").addEventListener("submit", e => { e.preventDefault(); runAsk($("#askInput").value); });
-  document.querySelectorAll("[data-ask-suggestion]").forEach(el => el.addEventListener("click", () => runAsk(el.dataset.askSuggestion)));
-  document.querySelectorAll("[data-clarify-field]").forEach(el => el.addEventListener("click", () => resumeAsk(el.dataset.requestId, { field: el.dataset.clarifyField, value: el.dataset.clarifyValue, label: el.dataset.clarifyLabel })));
+  if ($("#askForm")) $("#askForm").addEventListener("submit", e => { e.preventDefault(); submitAskMessage($("#askInput").value); });
+  document.querySelectorAll("[data-ask-suggestion]").forEach(el => el.addEventListener("click", () => submitAskMessage(el.dataset.askSuggestion)));
   document.querySelectorAll("[data-ask-drawer]").forEach(el => el.addEventListener("click", () => openDrawer(el.dataset.askDrawer === "evidence" ? "askEvidence" : "askHow", "ask")));
   document.querySelectorAll("[data-ask-chip]").forEach(el => el.addEventListener("click", () => {
     const value = el.dataset.askChip;
@@ -1038,16 +1294,37 @@ function bindEvents() {
     if (value === state.period) state.period = "FY2026";
     if (value === state.assetClass) state.assetClass = "All";
     if (value === state.manager) state.manager = "All";
+    if (value.startsWith("Signal ")) state.ask.context = { ...state.ask.context, research_signal_id: null };
     render();
   }));
   document.querySelectorAll("[data-asset]").forEach(el => el.addEventListener("click", () => openDrawer("asset", el.dataset.asset)));
   document.querySelectorAll("[data-manager-row]").forEach(el => el.addEventListener("click", () => openDrawer("manager", el.dataset.managerRow)));
   document.querySelectorAll("[data-manager-view]").forEach(el => el.addEventListener("click", () => { state.managerView = el.dataset.managerView; render(); }));
   document.querySelectorAll("[data-attention]").forEach(el => el.addEventListener("click", () => attentionItems()[Number(el.dataset.attention)]?.action()));
-  document.querySelectorAll("[data-page]").forEach(el => el.addEventListener("click", () => { state.page = el.dataset.page; state.drawer = null; render(); }));
+  document.querySelectorAll("[data-page]").forEach(el => el.addEventListener("click", () => {
+    if (el.dataset.askContext) applyAskContext(el.dataset.askContext);
+    state.page = el.dataset.page;
+    state.drawer = null;
+    render();
+  }));
   document.querySelectorAll("[data-scroll-signal]").forEach(el => el.addEventListener("click", () => document.getElementById(`signal-${el.dataset.scrollSignal}`)?.scrollIntoView({ behavior: "smooth", block: "start" })));
   document.querySelectorAll("[data-evidence]").forEach(el => el.addEventListener("click", () => openDrawer("evidence", el.dataset.evidence, "evidence")));
   document.querySelectorAll("[data-analysis]").forEach(el => el.addEventListener("click", () => openDrawer("evidence", el.dataset.analysis, "analysis")));
+}
+function applyAskContext(raw) {
+  try {
+    const context = JSON.parse(raw);
+    if (context.fund) state.fund = context.fund;
+    if (context.period) state.period = context.period;
+    if (context.asset_class) state.assetClass = context.asset_class;
+    if (context.manager) state.manager = context.manager;
+    state.ask.context = {
+      source_page: "insights",
+      research_signal_id: context.research_signal_id || null
+    };
+  } catch {
+    state.ask.context = {};
+  }
 }
 function openDrawer(type, id, mode) { state.drawer = { type, id, mode }; render(); }
 function closeDrawer() { state.drawer = null; render(); }

@@ -1,9 +1,10 @@
+import json
 from pathlib import Path
 
 import duckdb
 import pytest
 
-from beacon_data import AskBeaconAgent, AskBeaconService, ModelResponse, ScriptedModelAdapter, ToolCall, build_model
+from beacon_data import AskBeaconConversation, BeaconToolAdapter, ScriptedChatAdapter, ToolSelectingTestAdapter, build_grounded_response, build_model
 from beacon_data.business_tools import BeaconBusinessTools, tool_schemas
 from beacon_data.semantic import AskBeaconContext, interpret_query
 
@@ -566,227 +567,259 @@ def test_business_tools_return_structured_errors_for_invalid_inputs(tools):
         assert result["error"]["code"] == code
         assert result["error"]["message"]
 
+def test_langgraph_conversation_thread_persists_messages(tmp_path):
+    conversation = AskBeaconConversation(ScriptedChatAdapter(), tmp_path / "ask_beacon_checkpoints.sqlite")
+    thread_id = "thread_test_001"
 
-def event_names(result):
-    return [row["event"] for row in result["events"]]
+    first = conversation.ask(thread_id, "Who performed best?", {"fund": "BPT", "period": "FY2026"})
+    second = conversation.ask(thread_id, "Relative to benchmark.")
+    third = conversation.ask(thread_id, "What about consistency?")
 
-
-def test_agent_simple_tool_execution(model):
-    adapter = ScriptedModelAdapter(
-        [
-            ModelResponse(tool_calls=[ToolCall("get_asset_allocation", {"fund": "BLE", "period": "Q3", "asset_class": "Private Equity"})]),
-            ModelResponse(final_answer="BLE Private Equity was 20.8% versus a 20.0% policy target in Q3, a +0.80pp drift. Source: 20260331_FYTD.xlsx, Asset_Allocation row 50."),
-        ]
-    )
-    result = AskBeaconAgent(model, adapter).answer("What was BLE's Private Equity allocation versus target in Q3?")
-    assert result["ok"] is True
-    assert "20.8%" in result["answer"]
-    assert "source_verified" in event_names(result)
-    assert result["tool_observations"][0]["tool"] == "get_asset_allocation"
-
-
-def test_agent_multi_step_investigation_execution(model):
-    adapter = ScriptedModelAdapter(
-        [
-            ModelResponse(tool_calls=[ToolCall("get_fund_summary", {"fund": "BPT", "period": "FY2026"})]),
-            ModelResponse(tool_calls=[ToolCall("get_research_signals", {"fund": "BPT", "period": "FY2026"})]),
-            ModelResponse(tool_calls=[ToolCall("rank_managers", {"period": "FY2026", "metric": "excess return", "direction": "asc", "fund": "BPT", "limit": 3})]),
-            ModelResponse(tool_calls=[ToolCall("get_cash_flows", {"fund": "BPT", "period": "FY2026"})]),
-            ModelResponse(final_answer="Investigate BPT's largest sourced policy drift, weakest benchmark-relative managers, and FY2026 cash-flow pressure. These are sourced observations, not a causal claim."),
-        ]
-    )
-    result = AskBeaconAgent(model, adapter).answer("What should I investigate about BPT this year?")
-    assert result["ok"] is True
-    assert len(result["tool_observations"]) == 4
-    assert event_names(result).count("tool_completed") == 4
-    assert "not a causal claim" in result["answer"]
-
-
-def test_agent_contextual_comparison_execution(model):
-    adapter = ScriptedModelAdapter(
-        [
-            ModelResponse(tool_calls=[ToolCall("compare_funds", {"metric": "allocation_drift_pp", "period": "FY2026", "asset_class": "Private Equity"})]),
-            ModelResponse(final_answer="Against BLE, BPT Private Equity drift was +0.97pp versus BLE at +0.94pp in FY2026. Source: 20260630_FYTD.xlsx Asset_Allocation rows 59 and 68."),
-        ]
-    )
-    context = {"fund": "BPT", "period": "FY2026", "asset_class": "Private Equity", "source_page": "portfolio"}
-    result = AskBeaconAgent(model, adapter).answer("Compare this with BLE.", context)
-    assert result["ok"] is True
-    assert result["events"][0]["interpretation"]["compare_to_fund"] == "BLE"
-    assert result["tool_observations"][0]["tool"] == "compare_funds"
-
-
-def test_agent_requests_clarification_before_model_when_semantic_layer_flags_ambiguity(model):
-    adapter = ScriptedModelAdapter([])
-    result = AskBeaconAgent(model, adapter).answer("Who was the best performer?")
-    assert result["ok"] is False
-    assert result["status"] == "needs_clarification"
-    assert adapter.calls == 0
-    assert "clarification_requested" in event_names(result)
-
-
-def test_agent_handles_model_out_of_scope(model):
-    adapter = ScriptedModelAdapter([ModelResponse(out_of_scope="That question is outside Beacon's FY2026 portfolio dataset.")])
-    result = AskBeaconAgent(model, adapter).answer("What is the weather tomorrow?", {"fund": "BPT", "period": "Q4"})
-    assert result["ok"] is False
-    assert result["status"] == "out_of_scope"
-    assert "out_of_scope" in event_names(result)
-
-
-def test_agent_records_tool_validation_failure(model):
-    adapter = ScriptedModelAdapter(
-        [
-            ModelResponse(tool_calls=[ToolCall("get_fund_summary", {"fund": "BPT", "period": "Q8"})]),
-            ModelResponse(final_answer="I cannot answer because Q8 is not a supported Beacon period."),
-        ]
-    )
-    result = AskBeaconAgent(model, adapter).answer("Show BPT in Q8.", {"fund": "BPT", "period": "Q4"})
-    assert result["ok"] is False
-    assert result["status"] == "validation_failed"
-    assert result["tool_observations"][0]["error"]["code"] == "invalid_period"
-    assert "validation_failed" in event_names(result)
-
-
-def test_agent_rejects_final_financial_answer_without_tools(model):
-    adapter = ScriptedModelAdapter([ModelResponse(final_answer="BPT returned 9.9%.")])
-    result = AskBeaconAgent(model, adapter).answer("What did BPT return in Q4?", {"fund": "BPT", "period": "Q4"})
-    assert result["ok"] is False
-    assert result["status"] == "validation_failed"
-    assert "require at least one successful deterministic Beacon tool observation" in result["answer"]
-
-
-def test_agent_max_steps_guard(model):
-    adapter = ScriptedModelAdapter([ModelResponse(tool_calls=[ToolCall("get_fund_summary", {"fund": "BPT", "period": "Q4"})]) for _ in range(3)])
-    result = AskBeaconAgent(model, adapter, max_steps=2).answer("Keep looking at BPT.", {"fund": "BPT", "period": "Q4"})
-    assert result["ok"] is False
-    assert result["status"] == "max_steps_exceeded"
-    assert len(result["tool_observations"]) == 2
-
-
-def test_agent_clarifies_best_manager_metric_before_model(model):
-    adapter = ScriptedModelAdapter([])
-    result = AskBeaconAgent(model, adapter).answer("Which manager performed best?")
-    assert result["ok"] is False
-    assert result["outcome"] == "clarify"
-    assert adapter.calls == 0
-    assert "Highest absolute return" in result["answer"]
-    assert "Highest excess return vs benchmark" in result["answer"]
-    assert "Most consistent outperformer" in result["answer"]
-
-
-def test_agent_clarifies_asset_review_dimension_before_model(model):
-    adapter = ScriptedModelAdapter([])
-    result = AskBeaconAgent(model, adapter).answer("How did Private Equity do?")
-    assert result["ok"] is False
-    assert result["outcome"] == "clarify"
-    assert adapter.calls == 0
-    assert "Performance vs benchmark" in result["answer"]
-    assert "Allocation vs policy" in result["answer"]
-    assert "Underlying managers" in result["answer"]
-    assert "Full review" in result["answer"]
-
-
-def test_agent_uses_context_for_why_did_this_move(model):
-    adapter = ScriptedModelAdapter(
-        [
-            ModelResponse(tool_calls=[ToolCall("get_allocation_history", {"fund": "BPT", "asset_class": "Private Equity"})]),
-            ModelResponse(final_answer="BPT Private Equity moved based on observed allocation drift over FY2026. This describes the allocation trend, not causality. Sources are in the tool provenance."),
-        ]
-    )
-    context = {"fund": "BPT", "period": "FY2026", "asset_class": "Private Equity", "source_page": "insights", "research_signal_id": "SIG_002"}
-    result = AskBeaconAgent(model, adapter).answer("Why did this move?", context)
-    assert result["ok"] is True
-    assert result["outcome"] == "answer"
-    assert adapter.calls == 2
-    assert result["tool_observations"][0]["tool"] == "get_allocation_history"
-
-
-def test_agent_marks_strategy_data_out_of_scope_before_model(model):
-    adapter = ScriptedModelAdapter([])
-    result = AskBeaconAgent(model, adapter).answer("Why did Manager XYZ change investment strategy?")
-    assert result["ok"] is False
-    assert result["outcome"] == "out_of_scope"
-    assert adapter.calls == 0
-    assert "cannot establish why an investment strategy changed" in result["answer"]
-    assert "analyse the manager's performance" in result["answer"]
-    assert "compare the manager with its benchmark" in result["answer"]
-    assert "show the quarterly trend" in result["answer"]
-
-
-def test_agent_handles_unsupported_manager_underperformance_causality(model):
-    adapter = ScriptedModelAdapter([])
-    result = AskBeaconAgent(model, adapter).answer("Why did Compass Infrastructure Partners underperform?", {"fund": "BPT", "period": "FY2026"})
-    assert result["ok"] is True
-    assert result["outcome"] == "unsupported_causality"
-    assert adapter.calls == 0
-    assert len(result["tool_observations"]) == 2
-    assert "holdings-level attribution is unavailable" in result["answer"]
-    assert "cannot establish why" in result["answer"]
-
-
-def test_ask_service_returns_machine_readable_clarification(model):
-    service = AskBeaconService(model)
-    result = service.create_request("Who performed best?", {"fund": "BPT", "period": "FY2026"})
-    assert result["type"] == "clarification"
-    assert result["status"] == "waiting_for_clarification"
-    assert result["request_id"].startswith("req_")
-    assert result["question"] == "How should I measure best performance?"
-    assert result["options"] == [
-        {"label": "Highest absolute return", "field": "ranking_metric", "value": "manager_return_pct"},
-        {"label": "Highest return vs benchmark", "field": "ranking_metric", "value": "manager_excess_return_pp"},
-        {"label": "Most consistent outperformer", "field": "ranking_metric", "value": "manager_consistency"},
+    assert "highest absolute return" in first["answer"]
+    assert "benchmark-relative performance" in second["answer"]
+    assert "same BPT FY2026 manager question" in third["answer"]
+    assert [message["content"] for message in third["messages"] if message["role"] == "user"] == [
+        "Who performed best?",
+        "Relative to benchmark.",
+        "What about consistency?",
     ]
-    debug = result["debug_state"]
-    assert debug["original_query"] == "Who performed best?"
-    assert debug["intent"] == "manager_ranking"
-    assert debug["ambiguities"]["field"] == "ranking_metric"
+    assert len([message for message in third["messages"] if message["role"] == "assistant"]) == 3
+    assert third["application_context"] == {"fund": "BPT", "period": "FY2026"}
+    assert (tmp_path / "ask_beacon_checkpoints.sqlite").exists()
+    assert all(event["event"] == "model_completed" for event in third["tool_events"])
+    conversation.close()
 
 
-def test_ask_service_clarification_resumes_same_request_and_answers(model):
-    service = AskBeaconService(model)
-    first = service.create_request("Who performed best?", {"fund": "BPT", "period": "FY2026"})
-    request_id = first["request_id"]
-    result = service.clarify(request_id, {"field": "ranking_metric", "value": "manager_excess_return_pp", "label": "Highest return vs benchmark"})
-    assert result["type"] == "answer"
-    assert result["ok"] is True
-    assert result["request_id"] == request_id
-    assert "BPT" in result["answer"]
-    assert "FY2026" in result["answer"]
-    assert result["metrics"][2]["metric_id"] == "manager_excess_return_pp"
-    assert result["metrics"][2]["provenance"]["source_record_ids"]
-    events = [event["status"] for event in result["debug_state"]["events"]]
-    assert "waiting_for_clarification" in events
-    assert "clarification_received" in events
-    assert "ready" in events
-    assert "tool_running" in events
-    assert "tool_complete" in events
-    assert "validated" in events
-    assert "answered" in events
-    assert result["debug_state"]["current_status"] == "answered"
-    assert result["debug_state"]["clarification_selected"]["value"] == "manager_excess_return_pp"
+def test_langgraph_separate_threads_are_isolated(tmp_path):
+    conversation = AskBeaconConversation(ScriptedChatAdapter(), tmp_path / "ask_beacon_checkpoints.sqlite")
+
+    conversation.ask("thread_test_001", "Who performed best?", {"fund": "BPT", "period": "FY2026"})
+    conversation.ask("thread_test_001", "Relative to benchmark.")
+    isolated = conversation.ask("thread_test_002", "What about consistency?", {"fund": "BLE", "period": "Q4"})
+
+    assert "different fund or period" in isolated["answer"]
+    assert "benchmark-relative" not in isolated["answer"]
+    assert [message["content"] for message in isolated["messages"] if message["role"] == "user"] == ["What about consistency?"]
+    assert isolated["application_context"] == {"fund": "BLE", "period": "Q4"}
+    conversation.close()
 
 
-def test_ask_service_all_best_performance_choices_resume_to_canonical_tools(model):
-    expected = {
-        "manager_return_pct": "Manager return",
-        "manager_excess_return_pp": "Excess return",
-        "manager_consistency": "Quarters outperforming",
+def test_langgraph_financial_tools_answer_requested_questions(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_tools.sqlite", model=model)
+    cases = [
+        ("What was BPT's FY2026 return?", "get_fund_performance", "fund_return_pct"),
+        ("How far was BPT Cash from policy in Q4?", "get_asset_allocation", "allocation_drift_pp"),
+        ("Which manager underperformed its benchmark most in Q4?", "rank_managers", "manager_excess_return_pp"),
+        ("What was BLE Private Equity allocation versus policy in Q3?", "get_asset_allocation", "actual_allocation_pct"),
+    ]
+
+    for index, (question, tool_name, metric_id) in enumerate(cases, start=1):
+        result = conversation.ask(f"thread_tool_test_{index}", question)
+        tool_events = [event for event in result["turn_tool_events"] if event["event"] == "tool_completed"]
+        matching_events = [event for event in tool_events if event["tool"] == tool_name]
+        assert matching_events
+        assert matching_events[-1]["ok"] is True
+        assert matching_events[-1]["record_ids"]
+        assert result["sources"]
+        assert metric_id in str([message["content"] for message in result["messages"] if message["role"] == "tool"])
+        assert result["answer"]
+    conversation.close()
+
+
+def test_langgraph_native_ambiguity_resolution_uses_same_thread(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_ambiguity.sqlite", model=model)
+    thread_id = "thread_native_ambiguity_001"
+
+    first = conversation.ask(thread_id, "Who performed best?", {"fund": "BPT", "period": "FY2026"})
+    second = conversation.ask(thread_id, "Relative to benchmark.")
+    third = conversation.ask(thread_id, "How consistent were they?")
+
+    assert "highest absolute return" in first["answer"]
+    assert "strongest benchmark-relative performance" in second["answer"]
+    selected = [event for event in second["turn_tool_events"] if event["event"] == "tool_selected"]
+    assert any(event["tool"] == "rank_managers" and event["arguments"]["fund"] == "BPT" and event["arguments"]["period"] == "FY2026" and event["arguments"]["metric"] == "excess_return" for event in selected)
+    assert any(event["tool"] == "get_manager_performance" for event in selected)
+    assert second["sources"]
+    assert "outperformed in" in third["answer"]
+    assert any(event["event"] == "tool_selected" and event["tool"] == "get_manager_performance" for event in third["turn_tool_events"])
+    user_messages = [message["content"] for message in third["messages"] if message["role"] == "user"]
+    assert user_messages == ["Who performed best?", "Relative to benchmark.", "How consistent were they?"]
+    conversation.close()
+
+
+def test_langgraph_absolute_return_resolution_uses_absolute_metric(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_absolute.sqlite", model=model)
+    thread_id = "thread_native_ambiguity_002"
+
+    conversation.ask(thread_id, "Who performed best?", {"fund": "BPT", "period": "FY2026"})
+    result = conversation.ask(thread_id, "Absolute return.")
+
+    selected = [event for event in result["turn_tool_events"] if event["event"] == "tool_selected"]
+    assert any(event["tool"] == "rank_managers" and event["arguments"]["metric"] == "absolute_return" for event in selected)
+    assert "highest absolute return" in result["answer"]
+    assert result["sources"]
+    conversation.close()
+
+
+def test_grounded_response_validates_valid_numerical_answer(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_grounded.sqlite", model=model)
+    result = conversation.ask("thread_grounded_valid", "What was BLE Private Equity allocation versus policy in Q3?")
+
+    grounded = result["grounded_response"]
+    assert grounded["answer"] == result["answer"]
+    assert grounded["metrics"]
+    assert grounded["sources"]
+    assert grounded["activity_events"]
+    assert grounded["validation_errors"] == []
+    assert any(metric["metric_id"] == "actual_allocation_pct" for metric in grounded["metrics"])
+    assert all(metric["calculation_owner"] == "Python" for metric in grounded["metrics"])
+    conversation.close()
+
+
+def test_grounded_response_reports_invalid_period(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_grounded_errors.sqlite", model=model)
+    result = conversation.ask("thread_grounded_invalid_period", "Show BPT Q8.")
+
+    assert "invalid_period" in result["validation_errors"]
+    assert result["grounded_response"]["validation_errors"] == ["invalid_period"]
+    assert result["grounded_response"]["metrics"] == []
+    conversation.close()
+
+
+def test_grounded_response_reports_unknown_fund(model, tmp_path):
+    adapter = BeaconToolAdapter(model)
+    observation = adapter.get_fund_performance("XYZ", "Q4")
+    grounded = build_grounded_response(
+        answer="I could not answer that: Unknown fund.",
+        user_message="How did Fund XYZ do in Q4?",
+        application_context={},
+        turn_messages=[{"role": "tool", "content": json.dumps(observation)}],
+        turn_tool_events=[{"event": "tool_completed", "tool": "get_fund_performance", "ok": False, "record_ids": []}],
+        turn_sources=[],
+    )
+
+    assert grounded["validation_errors"] == ["unknown_entity"]
+    assert grounded["metrics"] == []
+
+
+def test_grounded_response_reports_unknown_manager(model):
+    adapter = BeaconToolAdapter(model)
+    observation = adapter.get_manager_history("Unknown Manager")
+    grounded = build_grounded_response(
+        answer="I could not answer that: Unknown manager.",
+        user_message="How did Unknown Manager do?",
+        application_context={},
+        turn_messages=[{"role": "tool", "content": json.dumps(observation)}],
+        turn_tool_events=[{"event": "tool_completed", "tool": "get_manager_history", "ok": False, "record_ids": []}],
+        turn_sources=[],
+    )
+
+    assert grounded["validation_errors"] == ["unknown_entity"]
+
+
+def test_grounded_response_detects_missing_provenance():
+    observation = {
+        "ok": True,
+        "tool": "get_fund_performance",
+        "arguments": {"fund": "BPT", "period": "FY2026"},
+        "fund": "BPT",
+        "period": "FY2026",
+        "fund_return_pct": {
+            "metric_id": "fund_return_pct",
+            "record_id": "TEST_NO_PROVENANCE",
+            "value": 4.25,
+            "unit": "percent",
+            "support_status": "supported",
+            "provenance": [],
+        },
     }
-    for value, metric_label in expected.items():
-        service = AskBeaconService(model)
-        first = service.create_request("Who performed best?", {"fund": "BPT", "period": "FY2026"})
-        result = service.clarify(first["request_id"], {"field": "ranking_metric", "value": value})
-        assert result["type"] == "answer"
-        assert result["request_id"] == first["request_id"]
-        labels = [metric["label"] for metric in result["metrics"]]
-        assert metric_label in labels
-        assert any(event["status"] == "tool_running" and event.get("tool_selected") == "rank_managers" for event in result["debug_state"]["events"])
-        assert any(event["status"] == "validated" and event["validation_result"]["ok"] for event in result["debug_state"]["events"])
+    grounded = build_grounded_response(
+        answer="BPT returned 4.25% in FY2026.",
+        user_message="What did BPT return in FY2026?",
+        application_context={},
+        turn_messages=[{"role": "tool", "content": json.dumps(observation)}],
+        turn_tool_events=[{"event": "tool_completed", "tool": "get_fund_performance", "ok": True, "record_ids": ["TEST_NO_PROVENANCE"]}],
+        turn_sources=[],
+    )
+
+    assert "missing_provenance" in grounded["validation_errors"]
+    assert grounded["limitations"]
 
 
-def test_ask_service_rejects_invalid_clarification_without_new_request(model):
-    service = AskBeaconService(model)
-    first = service.create_request("Who performed best?", {"fund": "BPT", "period": "FY2026"})
-    result = service.clarify(first["request_id"], {"field": "ranking_metric", "value": "display text only"})
-    assert result["type"] == "error"
-    assert result["error"]["code"] == "invalid_clarification"
+def test_grounded_response_detects_unsupported_metric():
+    observation = {
+        "ok": False,
+        "tool": "compare_funds",
+        "arguments": {"metric": "sharpe_ratio", "period": "Q4"},
+        "error": {"code": "unsupported_metric", "message": "Unsupported metric for Beacon business tools."},
+    }
+    grounded = build_grounded_response(
+        answer="I could not answer that: Unsupported metric for Beacon business tools.",
+        user_message="Compare Sharpe ratios in Q4.",
+        application_context={},
+        turn_messages=[{"role": "tool", "content": json.dumps(observation)}],
+        turn_tool_events=[{"event": "tool_completed", "tool": "compare_funds", "ok": False, "record_ids": []}],
+        turn_sources=[],
+    )
+
+    assert "unsupported_metric" in grounded["validation_errors"]
+    assert "not supported" in grounded["limitations"][0].lower()
+
+
+def test_grounded_response_qualifies_unsupported_causality():
+    observation = {
+        "ok": True,
+        "tool": "get_fund_performance",
+        "arguments": {"fund": "BPT", "period": "FY2026"},
+        "fund": "BPT",
+        "period": "FY2026",
+        "excess_return_pp": {
+            "metric_id": "fund_excess_return_pp",
+            "record_id": "TEST_CAUSALITY",
+            "value": -1.25,
+            "unit": "percentage points",
+            "support_status": "supported",
+            "provenance": [{"record_id": "TEST_CAUSALITY", "source_file": "test.xlsx", "source_sheet": "Fund", "source_row": 2, "source_cells": ["A2"]}],
+        },
+    }
+    grounded = build_grounded_response(
+        answer="BPT underperformed by -1.25pp because manager positioning caused it.",
+        user_message="Why did BPT underperform?",
+        application_context={},
+        turn_messages=[{"role": "tool", "content": json.dumps(observation)}],
+        turn_tool_events=[{"event": "tool_completed", "tool": "get_fund_performance", "ok": True, "record_ids": ["TEST_CAUSALITY"]}],
+        turn_sources=[{"record_id": "TEST_CAUSALITY", "source_file": "test.xlsx", "source_sheet": "Fund", "source_row": 2, "source_cells": ["A2"]}],
+    )
+
+    assert "unsupported_causality" in grounded["validation_errors"]
+    assert "does not establish" in grounded["answer"]
+
+
+def test_grounded_response_rejects_unsupported_numerical_values():
+    observation = {
+        "ok": True,
+        "tool": "get_asset_allocation",
+        "arguments": {"fund": "BPT", "period": "Q4", "asset_class": "Cash"},
+        "fund": "BPT",
+        "period": "Q4",
+        "asset_class": "Cash",
+        "allocation_drift_pp": {
+            "metric_id": "allocation_drift_pp",
+            "record_id": "TEST_NUMERIC",
+            "value": -2.5,
+            "unit": "percentage points",
+            "support_status": "supported",
+            "provenance": [{"record_id": "TEST_NUMERIC", "source_file": "test.xlsx", "source_sheet": "Allocation", "source_row": 3, "source_cells": ["C3"]}],
+        },
+    }
+    grounded = build_grounded_response(
+        answer="BPT Cash was -2.50pp from policy, and the exposure was 99.99% of the fund.",
+        user_message="How far was BPT Cash from policy in Q4?",
+        application_context={},
+        turn_messages=[{"role": "tool", "content": json.dumps(observation)}],
+        turn_tool_events=[{"event": "tool_completed", "tool": "get_asset_allocation", "ok": True, "record_ids": ["TEST_NUMERIC"]}],
+        turn_sources=[{"record_id": "TEST_NUMERIC", "source_file": "test.xlsx", "source_sheet": "Allocation", "source_row": 3, "source_cells": ["C3"]}],
+    )
+
+    assert grounded["validation_errors"] == ["unsupported_numerical_value"]
+    assert "cannot safely return" in grounded["answer"]

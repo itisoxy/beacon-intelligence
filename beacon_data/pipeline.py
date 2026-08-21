@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -55,12 +56,18 @@ def _json_value(value: Any) -> Any:
         return [_json_value(item) for item in value]
     if isinstance(value, dict):
         return {str(key): _json_value(item) for key, item in value.items()}
-    if pd.isna(value):
-        return None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if not isinstance(value, (str, bytes, bool)):
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
     if isinstance(value, pd.Timestamp):
         return value.date().isoformat()
     if hasattr(value, "item"):
-        return value.item()
+        return _json_value(value.item())
     return value
 
 
@@ -855,10 +862,32 @@ def build_model(data_dir: Path, output_dir: Path, store_path: Path) -> dict[str,
         },
     }
     output_dir.mkdir(parents=True, exist_ok=True)
-    json_text = json.dumps(model, indent=2, ensure_ascii=False)
+    json_text = json.dumps(_json_safe(model), indent=2, ensure_ascii=False, allow_nan=False)
     (output_dir / "beacon-data.json").write_text(json_text, encoding="utf-8")
     (output_dir / "beacon-data.js").write_text(f"window.BEACON_DATA = {json_text};\n", encoding="utf-8")
     return model
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, pd.Timestamp):
+        return value.date().isoformat()
+    if not isinstance(value, (str, bytes, bool)):
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+    if hasattr(value, "item"):
+        return _json_safe(value.item())
+    return value
 
 
 def main() -> None:
@@ -882,3 +911,7 @@ def main() -> None:
             indent=2,
         )
     )
+
+
+if __name__ == "__main__":
+    main()

@@ -1,8 +1,30 @@
 .venv/
+.env
+.env.*
 .pytest_cache/
 .tmp-agent-debug/
+data/runtime/
 __pycache__/
 *.py[cod]
 *.duckdb.wal
+
+# Frontend
+node_modules/
+.next/
+dist/
+build/
+
+# IDE / OS
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+.tmp-followup-test/
+.tmp-structured-test/
+
+LANGGRAPH_*_REPORT.md

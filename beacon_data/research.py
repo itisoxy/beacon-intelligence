@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +45,8 @@ class ResearchSignal:
     limitations: str
     visual: dict[str, Any] = field(default_factory=dict)
     related_analysis: list[dict[str, Any]] = field(default_factory=list)
+    possible_explanations: list[str] = field(default_factory=list)
+    what_to_check_next: list[str] = field(default_factory=list)
     selected: bool = False
 
 
@@ -104,6 +107,8 @@ def _signal(
     limitations: str,
     visual: dict[str, Any] | None = None,
     related_analysis: list[dict[str, Any]] | None = None,
+    possible_explanations: list[str] | None = None,
+    what_to_check_next: list[str] | None = None,
 ) -> ResearchSignal:
     refs = _source_refs(source_rows)
     return ResearchSignal(
@@ -132,7 +137,55 @@ def _signal(
         limitations=limitations,
         visual=visual or {},
         related_analysis=related_analysis or [],
+        possible_explanations=possible_explanations or _default_possible_explanations(type),
+        what_to_check_next=what_to_check_next or _default_check_next(type),
     )
+
+
+def _default_possible_explanations(signal_type: str) -> list[str]:
+    return {
+        "policy_drift": [
+            "market movement may have pulled the quarter-end allocation away from the policy target",
+            "rebalancing may have been delayed or intentionally staged because of implementation timing",
+            "cash flows or manager activity may have changed the denominator used for allocation percentages",
+        ],
+        "manager_consistency": [
+            "manager-specific execution may have lagged the benchmark opportunity set",
+            "the selected benchmark may not fully match the manager's mandate or style exposure",
+            "style, sector, or factor exposures may have been out of favor during the measured period",
+        ],
+        "cash_flow": [
+            "scheduled benefit payments or distributions may have increased the need to monitor available liquidity",
+            "cash may have been intentionally staged for near-term obligations or planned deployment",
+            "net flows may have interacted with allocation drift, creating a rebalancing question rather than proving a liquidity problem",
+        ],
+        "relative_performance": [
+            "asset-class mix versus policy may have concentrated the benchmark-relative result",
+            "manager selection within one or two asset classes may explain more of the result than broad market exposure",
+            "benchmark-relative market conditions may have rewarded or penalized specific portfolio exposures",
+        ],
+        "cross_fund": [
+            "the two funds may have different policy targets for the same asset class",
+            "different fund sizes can make the same percentage drift represent different dollar significance",
+            "different liquidity needs may make a similar allocation signal more important for one fund than the other",
+        ],
+        "emerging_signal": [
+            "late-period market movement may have changed the signal between quarters",
+            "manager-specific relative results may have shifted enough to warrant follow-up",
+            "short-horizon volatility may be amplifying a signal that needs confirmation in the next period",
+        ],
+    }.get(signal_type, ["data-supported relationship that needs follow-up before assigning cause"])
+
+
+def _default_check_next(signal_type: str) -> list[str]:
+    return {
+        "policy_drift": ["review Q1-Q4 drift path", "check policy ranges", "confirm rebalancing or deployment plan"],
+        "manager_consistency": ["review quarterly excess-return path", "compare manager exposure size", "check mandate and benchmark fit"],
+        "cash_flow": ["review contribution and distribution timing", "compare net flows with AUM movement and allocation drift", "check whether liquidity planning assumptions still support rebalancing needs"],
+        "relative_performance": ["review asset-class relative drivers", "separate allocation and manager effects", "compare with policy benchmark"],
+        "cross_fund": ["compare policy targets", "review dollar variance by fund", "check whether governance question differs by fund"],
+        "emerging_signal": ["review Q3-to-Q4 movement", "test whether change persisted", "compare with full-year pattern"],
+    }.get(signal_type, ["review supporting metrics and source records"])
 
 
 def horizon_quarters(horizon: str) -> list[str]:
@@ -563,9 +616,9 @@ def analyse_cash_flow_patterns(fund_horizon: pd.DataFrame, cash_flow: pd.DataFra
                 for _, row in related.iterrows()
             },
             observation=f"{more_negative['FundCode']} net cash flow was {_fmt_money(more_negative['NetCashFlow'])}, or {_fmt_pct(more_negative['net_flow_to_aum_pct'])} of ending AUM.",
-            interpretation="The observed flow pattern may increase the importance of monitoring liquidity and rebalancing needs, but it does not establish a liquidity problem.",
-            why_it_matters="Cash-flow posture changes how urgently portfolio drift and illiquid exposure questions may matter to a CIO.",
-            cio_question="Are current liquidity sources aligned with benefit/distribution requirements and rebalancing needs?",
+            interpretation="The observed flow pattern points to monitoring liquidity and rebalancing needs more closely, but it does not establish a liquidity problem.",
+            why_it_matters="Cash-flow posture can affect how closely portfolio drift, liquid reserves, and rebalancing timing should be monitored.",
+            cio_question="Are current liquidity sources aligned with benefit/distribution requirements and potential rebalancing needs?",
             significance_score=76 + abs(float(more_negative["net_flow_to_aum_pct"])) * 3,
             source_rows=source,
             limitations="The dataset has cash-flow categories but no liquidity schedule, capital-call pipeline, or spending-policy detail.",
@@ -771,15 +824,23 @@ def research_summary(final_signals: list[ResearchSignal], horizon: str = "FY2026
 
 def _clean_json(value: Any) -> Any:
     if isinstance(value, pd.DataFrame):
-        return value.drop(columns=["_provenance"], errors="ignore").to_dict(orient="records")
+        return _clean_json(value.drop(columns=["_provenance"], errors="ignore").to_dict(orient="records"))
     if isinstance(value, pd.Series):
-        return value.drop(labels=["_provenance"], errors="ignore").to_dict()
+        return _clean_json(value.drop(labels=["_provenance"], errors="ignore").to_dict())
     if isinstance(value, dict):
         return {str(k): _clean_json(v) for k, v in value.items() if k != "source"}
     if isinstance(value, list):
         return [_clean_json(v) for v in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if not isinstance(value, (str, bytes, bool)):
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
     if hasattr(value, "item"):
-        return value.item()
+        return _clean_json(value.item())
     return value
 
 

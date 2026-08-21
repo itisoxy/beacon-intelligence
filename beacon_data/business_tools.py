@@ -26,42 +26,42 @@ RANKING_METRICS = {
 TOOL_SCHEMAS = [
     {
         "name": "get_fund_summary",
-        "description": "Return fund-level AUM, return, benchmark, excess return, cash flow and gain/loss for a period.",
+        "description": "Retrieve canonical fund-level return, policy benchmark, excess return, AUM and related performance metrics for a fund and period.",
         "parameters": {"fund": "BPT | BLE | All", "period": "Q1 | Q2 | Q3 | Q4 | FY2026 | H1 FY2026 | H2 FY2026"},
     },
     {
         "name": "get_asset_allocation",
-        "description": "Return allocation metrics for one fund, period and asset class.",
+        "description": "Retrieve actual versus policy allocation, drift and dollar variance for one fund, period and asset class.",
         "parameters": {"fund": "BPT | BLE | All", "period": "Q1 | Q2 | Q3 | Q4 | FY2026 | H1 FY2026 | H2 FY2026", "asset_class": "dataset asset class"},
     },
     {
         "name": "get_allocation_history",
-        "description": "Return Q1-Q4 actual, target and drift history for one fund and asset class.",
+        "description": "Retrieve Q1-Q4 allocation movement to determine whether a position or drift is increasing, decreasing or persistent.",
         "parameters": {"fund": "BPT | BLE | All", "asset_class": "dataset asset class"},
     },
     {
         "name": "get_manager_performance",
-        "description": "Return manager performance rows filtered by manager, fund, period and/or asset class.",
+        "description": "Retrieve canonical manager return, benchmark, excess return and consistency rows.",
         "parameters": {"manager": "optional manager name", "fund": "optional fund", "period": "optional period", "asset_class": "optional asset class"},
     },
     {
         "name": "rank_managers",
-        "description": "Rank managers by absolute return, excess return, or consistency.",
+        "description": "Rank managers using canonical performance and benchmark-relative metrics. Use for strongest/weakest manager questions.",
         "parameters": {"period": "required period", "metric": "absolute return | excess return | consistency", "direction": "asc | desc", "fund": "optional fund", "asset_class": "optional asset class", "limit": "optional integer"},
     },
     {
         "name": "get_manager_history",
-        "description": "Return Q1-Q4 manager return, benchmark and excess history.",
+        "description": "Retrieve manager performance across periods for consistency, deterioration or trend analysis.",
         "parameters": {"manager": "manager name", "fund": "optional fund"},
     },
     {
         "name": "get_cash_flows",
-        "description": "Return cash-flow details and net cash flow for a fund and period.",
+        "description": "Retrieve canonical contributions, distributions and net cash flows for a fund and period.",
         "parameters": {"fund": "BPT | BLE | All", "period": "Q1 | Q2 | Q3 | Q4 | FY2026 | H1 FY2026 | H2 FY2026"},
     },
     {
         "name": "compare_funds",
-        "description": "Compare BPT and BLE for a metric and period, optionally for an asset class.",
+        "description": "Compare canonical metrics across BPT and BLE for fund or allocation comparison questions.",
         "parameters": {"metric": "metric id or ranking metric alias", "period": "required period", "asset_class": "optional asset class"},
     },
     {
@@ -71,7 +71,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "get_research_signals",
-        "description": "Return deterministic research signals filtered by fund, period, asset class, or manager.",
+        "description": "Retrieve ranked evidence-backed investment research signals for what stands out, risks, concerns, CIO focus areas or unusual developments.",
         "parameters": {"fund": "optional fund", "period": "optional period", "asset_class": "optional asset class", "manager": "optional manager"},
     },
     {
@@ -81,7 +81,7 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "get_source_record",
-        "description": "Return compact lineage for a normalized record id or source record id.",
+        "description": "Retrieve workbook, sheet, row and cell provenance supporting a metric, research signal or previous answer.",
         "parameters": {"record_id": "canonical record_id, metric_value_id, signal id, or source_record_id"},
     },
 ]
@@ -282,17 +282,7 @@ class BeaconBusinessTools:
                 continue
             if manager and signal.get("manager") != manager:
                 continue
-            rows.append(
-                {
-                    "signal_id": signal["id"],
-                    "type": signal["type"],
-                    "horizon": signal["horizon"],
-                    "headline": signal["headline"],
-                    "primary_metric": signal["primary_metric"],
-                    "primary_value": signal["primary_value"],
-                    "provenance": self._provenance(signal),
-                }
-            )
+            rows.append({**signal, "signal_id": signal["id"], "provenance": self._provenance(signal)})
         if not rows:
             return self._error("get_research_signals", {"fund": fund, "period": period, "asset_class": asset_class, "manager": manager}, "no_data", "No research signals matched the requested filters.")
         return self._result("get_research_signals", {"fund": fund, "period": period, "asset_class": asset_class, "manager": manager}, rows=rows)
