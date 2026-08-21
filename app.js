@@ -205,7 +205,7 @@ function sidebar() {
   </aside>`;
 }
 function filters() {
-  const funds = [`<option value="All">Combined / All</option>`, ...data.dimensions.funds.map(f => `<option value="${f.FundCode}">${f.FundCode} â€” ${f.FundName}</option>`)].join("");
+  const funds = [`<option value="All">Combined / All</option>`, ...data.dimensions.funds.map(f => `<option value="${f.FundCode}">${f.FundCode} - ${f.FundName}</option>`)].join("");
   const assets = [`<option>All</option>`, ...data.dimensions.asset_classes.map(a => `<option>${a}</option>`)].join("");
   const managers = [`<option>All</option>`, ...data.dimensions.managers.map(m => `<option>${m}</option>`)].join("");
   return `<div class="filter-grid">
@@ -218,7 +218,7 @@ function filters() {
 }
 function chips() {
   const items = [state.fund === "All" ? "Combined" : state.fund, state.period, state.assetClass, state.manager].filter(v => v !== "All");
-  return `<div class="chips">${items.map(v => `<button class="chip" data-chip="${v}">${v} Ã—</button>`).join("")}</div>`;
+  return `<div class="chips">${items.map(v => `<button class="chip" data-chip="${v}">${v} x</button>`).join("")}</div>`;
 }
 function askContextChips() {
   const items = [
@@ -292,7 +292,7 @@ function askMessage(message) {
     <p class="eyebrow">Beacon</p>
     ${askAnswerText(message.content)}
     ${metrics.length ? `<div class="ask-metrics">${metrics.map(askMetricCard).join("")}</div>` : ""}
-    ${result.structured_response ? askStructuredResponse(result.structured_response) : ""}
+    ${!clarify && result.structured_response ? askStructuredResponse(result.structured_response) : ""}
     ${clarify ? askQuickReplies(message.content, result) : ""}
     <div class="ask-answer-actions">
       ${(result.evidence || []).length ? `<button class="text-action" data-ask-drawer="evidence">View evidence</button>` : ""}
@@ -306,19 +306,30 @@ function askAnswerText(value) {
   return `<div class="ask-answer-text">${paragraphs.map(part => `<p>${escapeHtml(part)}</p>`).join("")}</div>`;
 }
 function askQuickReplies(text, result = {}) {
-  const options = result.clarification_options?.length ? result.clarification_options : clarificationSuggestions(text);
+  const options = uniqueAskOptions(result.clarification_options?.length ? result.clarification_options : clarificationSuggestions(text));
   if (!options.length) return "";
   return `<div class="ask-choice-grid">${options.map(askSuggestionButton).join("")}</div>`;
+}
+function uniqueAskOptions(options = []) {
+  const seen = new Set();
+  return options.filter(option => {
+    const item = typeof option === "string" ? { label: option, message: option } : option;
+    const key = `${item.label || ""}|${item.message || ""}`.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 function askClarification(result) {
   const options = result.options?.length
     ? result.options.map(option => ({ label: option.label, message: option.reply || option.label }))
     : clarificationSuggestions(result.question || result.answer);
+  const uniqueOptions = uniqueAskOptions(options);
   return `<div class="ask-answer-wrap">
     <article class="ask-answer ask-clarify">
       <p class="eyebrow">Clarification</p>
       <h3>${result.question || result.answer}</h3>
-      ${options.length ? `<div class="ask-choice-grid">${options.map(askSuggestionButton).join("")}</div>` : ""}
+      ${uniqueOptions.length ? `<div class="ask-choice-grid">${uniqueOptions.map(askSuggestionButton).join("")}</div>` : ""}
       <button class="text-action" data-ask-drawer="how">How Beacon answered</button>
     </article>
   </div>`;
@@ -809,7 +820,7 @@ function movement(s, qoq) {
         <div><p class="eyebrow">${periodLabel} Change %</p><strong class="${cls(qoq.pct)}">${fmtPct(qoq.pct, 2)}</strong></div>
         <div><p class="eyebrow">Net Cash Flow</p><strong class="${cls(s.NetCashFlow)}">${fmtMoney(s.NetCashFlow)}</strong></div>
         <div><p class="eyebrow">Gain / Loss</p><strong class="${cls(s.InvestmentGainLoss)}">${fmtMoney(s.InvestmentGainLoss)}</strong></div>
-        <div><p class="eyebrow">Reconciliation</p><strong class="positive">Variance â‰¤ $0.05M</strong></div>
+        <div><p class="eyebrow">Reconciliation</p><strong class="positive">Variance <= $0.05M</strong></div>
       </div>
     </section>
     <section class="panel section">
@@ -1082,9 +1093,9 @@ function humanLabel(key) {
   return labels[key] || key.replaceAll("_", " ").replace(/\b\w/g, c => c.toUpperCase());
 }
 function formatMetricValue(key, value) {
-  if (Array.isArray(value)) return value.map(v => Number.isFinite(Number(v)) ? fmtPp(Number(v)) : v).join(" Â· ");
+  if (Array.isArray(value)) return value.map(v => Number.isFinite(Number(v)) ? fmtPp(Number(v)) : v).join(" / ");
   if (value && typeof value === "object") {
-    return Object.entries(value).map(([k, v]) => `${humanLabel(k)} ${formatMetricValue(k, v)}`).join(" Â· ");
+    return Object.entries(value).map(([k, v]) => `${humanLabel(k)} ${formatMetricValue(k, v)}`).join(" / ");
   }
   const n = Number(value);
   if (!Number.isFinite(n)) return value;
@@ -1158,7 +1169,7 @@ function relatedAnalysisCard(row, signal, index, rows) {
       <h4>${row.ManagerName || row.manager}</h4>
       <p>${row.AssetClassLevel1 || row.asset || ""}</p>
       <dl>
-        <div><dt>Quarterly Excess</dt><dd>${path.map(v => `<span class="${cls(v)}">${fmtPp(v)}</span>`).join(" Â· ")}</dd></div>
+        <div><dt>Quarterly Excess</dt><dd>${path.map(v => `<span class="${cls(v)}">${fmtPp(v)}</span>`).join(" / ")}</dd></div>
         <div><dt>Consistency</dt><dd>${row.ahead ?? path.filter(v => Number(v) > 0).length} / 4 quarters ahead</dd></div>
       </dl>
       <p class="micro">Related because quarterly consistency is the evidence behind the manager pattern.</p>
@@ -1227,7 +1238,7 @@ function relatedAnalysis(signal) {
 function evidenceDrawer(id, mode = "evidence") {
   const signal = findSignal(id);
   if (!signal) return "";
-  return `<div class="drawer-head"><div><p class="eyebrow">${mode === "analysis" ? "Full Analysis" : "Evidence"}</p><h2>${signal.research_question}</h2></div><button class="close" onclick="closeDrawer()">Ã—</button></div>
+  return `<div class="drawer-head"><div><p class="eyebrow">${mode === "analysis" ? "Full Analysis" : "Evidence"}</p><h2>${signal.research_question}</h2></div><button class="close" onclick="closeDrawer()">x</button></div>
     <h3>Selected Insight</h3>
     <p>${signal.headline}</p>
     <h3>Scope</h3>
@@ -1242,7 +1253,7 @@ function evidenceDrawer(id, mode = "evidence") {
     <h3 style="margin-top:18px">Related Analysis</h3>
     ${relatedAnalysis(signal)}
     <h3 style="margin-top:18px">Source</h3>
-    <div class="source-list">${(signal.source_record_ids || []).slice(0, 8).map((id, i) => `<div><span>${id}</span><strong>${signal.source_files?.[0] || ""} Â· ${signal.source_sheets?.join(", ") || ""} Â· rows ${(signal.source_rows || []).slice(0,4).join(", ")}</strong></div>`).join("")}</div>
+    <div class="source-list">${(signal.source_record_ids || []).slice(0, 8).map((id, i) => `<div><span>${id}</span><strong>${signal.source_files?.[0] || ""} / ${signal.source_sheets?.join(", ") || ""} / rows ${(signal.source_rows || []).slice(0,4).join(", ")}</strong></div>`).join("")}</div>
     <button class="text-action source-record-action">View source record</button>
     <button class="ask-placeholder" data-page="Ask Beacon" data-ask-context='${escapeHtml(JSON.stringify({ fund: signal.fund, period: signal.period, asset_class: signal.asset_class, manager: signal.manager, research_signal_id: signal.id }))}'>Ask Beacon</button>
     <h3 style="margin-top:18px">Limitation</h3><p>${signal.limitations}</p>`;
@@ -1250,22 +1261,22 @@ function evidenceDrawer(id, mode = "evidence") {
 function assetDrawer(assetClass) {
   const row = driftRows().find(r => r.AssetClassLevel1 === assetClass);
   const managers = data.records.manager_detail.filter(m => m.AssetClassLevel1 === assetClass && m.Quarter === (state.period === "FY2026" ? "Q4" : state.period) && (state.fund === "All" || m.FundCode === state.fund));
-  return `<div class="drawer-head"><div><p class="eyebrow">Asset Class</p><h2>${assetClass}</h2></div><button class="close" onclick="closeDrawer()">Ã—</button></div>
+  return `<div class="drawer-head"><div><p class="eyebrow">Asset Class</p><h2>${assetClass}</h2></div><button class="close" onclick="closeDrawer()">x</button></div>
     <div class="detail-grid">
       <div class="detail-card"><p class="eyebrow">Market Value</p><strong>${fmtMoney(row?.EndingMarketValue)}</strong></div>
       <div class="detail-card"><p class="eyebrow">Actual Allocation</p><strong>${fmtPct(row?.PctOfFundTotal, 2)}</strong></div>
       <div class="detail-card"><p class="eyebrow">Policy Target</p><strong>${fmtPct(row?.PolicyTargetPct, 2)}</strong></div>
       <div class="detail-card"><p class="eyebrow">Drift</p><strong class="${cls(row?.VarianceToTargetPct)}">${fmtPp(row?.VarianceToTargetPct)}</strong></div>
     </div>
-    <h3>Allocation History</h3><p>${sourcePeriods.map((q, i) => `${q}: ${fmtPct(trendForAsset(assetClass)[i], 2)}`).join(" Â· ")}</p>
-    <h3 style="margin-top:18px">Performance</h3><p>Return ${fmtPct(row?.FYTDReturnPct, 2)} Â· Benchmark ${fmtPct(row?.BenchmarkFYTDReturnPct, 2)} Â· <span class="${cls(row?.ExcessFYTDReturnBps)}">${fmtPp(Number(row?.ExcessFYTDReturnBps || 0) / 100)}</span></p>
-    <h3 style="margin-top:18px">Underlying Managers</h3><ul>${managers.map(m => `<li>${m.ManagerName} Â· ${fmtMoney(m.MarketValue)}</li>`).join("")}</ul>
+    <h3>Allocation History</h3><p>${sourcePeriods.map((q, i) => `${q}: ${fmtPct(trendForAsset(assetClass)[i], 2)}`).join(" / ")}</p>
+    <h3 style="margin-top:18px">Performance</h3><p>Return ${fmtPct(row?.FYTDReturnPct, 2)} / Benchmark ${fmtPct(row?.BenchmarkFYTDReturnPct, 2)} / <span class="${cls(row?.ExcessFYTDReturnBps)}">${fmtPp(Number(row?.ExcessFYTDReturnBps || 0) / 100)}</span></p>
+    <h3 style="margin-top:18px">Underlying Managers</h3><ul>${managers.map(m => `<li>${m.ManagerName} / ${fmtMoney(m.MarketValue)}</li>`).join("")}</ul>
     <button class="ask-placeholder" data-page="Ask Beacon" data-ask-context='${escapeHtml(JSON.stringify({ asset_class: assetClass }))}'>Ask Beacon</button>`;
 }
 function managerDrawer(manager) {
   const row = managerRows().find(m => m.ManagerName === manager) || data.records.manager_detail.find(m => m.ManagerName === manager);
   const provenance = row?._provenance || {};
-  return `<div class="drawer-head"><div><p class="eyebrow">Manager</p><h2>${manager}</h2></div><button class="close" onclick="closeDrawer()">Ã—</button></div>
+  return `<div class="drawer-head"><div><p class="eyebrow">Manager</p><h2>${manager}</h2></div><button class="close" onclick="closeDrawer()">x</button></div>
     <div class="detail-grid">
       <div class="detail-card"><p class="eyebrow">Fund</p><strong>${fundName(row?.FundCode)}</strong></div>
       <div class="detail-card"><p class="eyebrow">Asset Class</p><strong>${row?.AssetClassLevel1}</strong></div>
@@ -1278,8 +1289,8 @@ function managerDrawer(manager) {
       const r = data.records.manager_detail.find(m => m.ManagerName === manager && m.Quarter === q && m.FundCode === row?.FundCode);
       const a = data.records.asset_allocation.find(x => x.FundCode === row?.FundCode && x.Quarter === q && x.AssetClassLevel1 === row?.AssetClassLevel1);
       return `${q}: ${r && a ? fmtPp(Number(r.QTDReturnPct) - Number(a.BenchmarkQTDReturnPct)) : "n/a"}`;
-    }).join(" Â· ")}</p>
-    <h3 style="margin-top:18px">Source Reference</h3><p class="micro">${provenance.source_file} Â· ${provenance.source_sheet} Â· row ${provenance.source_row} Â· ${row?.source_record_id || ""}</p>
+    }).join(" / ")}</p>
+    <h3 style="margin-top:18px">Source Reference</h3><p class="micro">${provenance.source_file} / ${provenance.source_sheet} / row ${provenance.source_row} / ${row?.source_record_id || ""}</p>
     <button class="ask-placeholder" data-page="Ask Beacon" data-ask-context='${escapeHtml(JSON.stringify({ fund: row?.FundCode, asset_class: row?.AssetClassLevel1, manager }))}'>Ask Beacon</button>`;
 }
 function bindEvents() {

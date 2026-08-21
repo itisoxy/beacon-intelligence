@@ -188,6 +188,12 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
     previous_manager = _latest_manager_from_tool_messages(messages)
     previous_asset = _latest_asset_from_tool_messages(messages) or asset_class
     comparison_fund = recent_context.get("comparison_fund") or context.get("comparison_fund")
+    pending_clarification = recent_context.get("pending_clarification") or context.get("pending_clarification")
+
+    if pending_clarification:
+        resolved = _resolve_pending_clarification(text, pending_clarification, fund, period, previous_manager, previous_asset, recent_context)
+        if resolved:
+            return resolved
 
     if _has_any(text, "q8", "q5"):
         return {"type": "tool", "tool": "get_fund_performance", "arguments": {"fund": fund or "BPT", "period": "Q8" if "q8" in text else "Q5"}}
@@ -275,11 +281,31 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
         return {"type": "clarify", "question": "Which allocation should I compare: Cash, Private Equity, Public Equity, Fixed Income, Real Assets, or Hedge Funds?"}
 
     if _has_any(text, "show quarterly trend", "quarterly trend", "show trend", "show quarterly"):
+        if previous_manager:
+            return {"type": "tool", "tool": "get_manager_history", "arguments": {"manager": previous_manager["manager"], "fund": previous_manager.get("fund") or fund}}
+        if previous_asset and recent_context.get("active_dimension") == "allocation":
+            return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": fund or "BPT", "asset_class": previous_asset}}
+        last_response_type = recent_context.get("last_response_type")
+        active_dimension = recent_context.get("active_dimension")
+        if last_response_type == "fund_performance" or active_dimension == "performance":
+            return {
+                "type": "tool",
+                "tool": "compare_periods",
+                "arguments": {"entity": fund or "BPT", "metric": "fund_return_pct", "period_a": "Q1", "period_b": "Q4", "fund": fund or "BPT"},
+            }
+        if last_response_type in {"manager_ranking", "manager_performance", "quarterly_trend"} or active_dimension == "manager":
+            if previous_manager:
+                return {"type": "tool", "tool": "get_manager_history", "arguments": {"manager": previous_manager["manager"], "fund": previous_manager.get("fund") or fund}}
+            return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": period, "metric": "excess_return", "direction": "ascending", "limit": 5}}
+        if last_response_type in {"allocation_drift", "allocation_history"} or active_dimension == "allocation":
+            if asset_class or previous_asset:
+                return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": fund or "BPT", "asset_class": asset_class or previous_asset}}
+            return {"type": "tool", "tool": "rank_asset_allocations", "arguments": {"fund": fund or "BPT", "period": period, "direction": "largest_absolute", "limit": 5}}
         if asset_class or previous_asset:
             return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": fund or "BPT", "asset_class": asset_class or previous_asset}}
         if previous_manager:
             return {"type": "tool", "tool": "get_manager_history", "arguments": {"manager": previous_manager["manager"], "fund": previous_manager.get("fund") or fund}}
-        return {"type": "clarify", "question": "Which quarterly trend should I show: an asset allocation trend, manager performance trend, or fund return trend?"}
+        return {"type": "clarify", "question": "For quarterly performance, do you mean fund returns, manager performance, or asset allocation?"}
 
     if _is_fund_followup(text, "BLE"):
         if previous_asset:
@@ -913,6 +939,7 @@ def build_ask_beacon_graph(adapter: ChatModelAdapter, checkpointer: SqliteSaver,
         elapsed_ms = round((time.perf_counter() - model_started) * 1000, 2)
         tool_calls = [call.get("name") for call in getattr(response, "tool_calls", [])]
         _safe_log_event({"event": "model_completed", "provider": adapter.provider_name, "model": adapter.model_name, "elapsed_ms": elapsed_ms, "tool_calls": tool_calls})
+        resolved_context = _pending_context_from_clarification(response, state)
         return {
             "messages": [response],
             "tool_events": [
@@ -932,6 +959,7 @@ def build_ask_beacon_graph(adapter: ChatModelAdapter, checkpointer: SqliteSaver,
             ],
             "sources": [],
             "validation_errors": [],
+            "resolved_context": resolved_context,
         }
 
     def tool_node(state: AskBeaconState) -> dict[str, Any]:
@@ -1064,8 +1092,76 @@ def _context_from_user_message(message: str, application_context: dict[str, Any]
     return context
 
 
+def _pending_context_from_clarification(response: BaseMessage, state: AskBeaconState) -> dict[str, Any]:
+    if getattr(response, "tool_calls", None):
+        return {}
+    answer = str(getattr(response, "content", "") or "")
+    if not _looks_like_clarification(answer):
+        return {}
+    latest_user = _latest_human_text(state.get("messages", []))
+    context = _merge_context(state.get("application_context", {}), state.get("resolved_context", {}))
+    text = answer.lower()
+    if "quarterly" in text and ("fund" in text or "manager" in text or "allocation" in text):
+        return {
+            "pending_clarification": {
+                "original_intent": "quarterly_trend",
+                "original_user_message": latest_user,
+                "known_context": {
+                    "fund": context.get("active_fund") or context.get("fund"),
+                    "period": context.get("active_period") or context.get("period") or "FY2026",
+                    "asset_class": context.get("active_asset_class") or context.get("asset_class"),
+                    "manager": context.get("active_manager") or context.get("manager"),
+                },
+                "missing_dimension": "trend_type",
+                "options": _quarterly_trend_options(),
+            }
+        }
+    return {}
+
+
+def _resolve_pending_clarification(
+    text: str,
+    pending: dict[str, Any],
+    fund: str | None,
+    period: str | None,
+    previous_manager: dict[str, Any] | None,
+    previous_asset: str | None,
+    recent_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(pending, dict) or pending.get("original_intent") != "quarterly_trend":
+        return None
+    selection = _quarterly_trend_selection(text)
+    if not selection:
+        return None
+    known = pending.get("known_context") or {}
+    resolved_fund = fund or known.get("fund") or recent_context.get("active_fund") or recent_context.get("fund") or "BPT"
+    resolved_period = period or known.get("period") or recent_context.get("active_period") or recent_context.get("period") or "FY2026"
+    resolved_asset = previous_asset or known.get("asset_class") or recent_context.get("active_asset_class") or recent_context.get("asset_class")
+    resolved_manager = previous_manager or (
+        {"manager": known.get("manager"), "fund": resolved_fund}
+        if known.get("manager")
+        else None
+    )
+    if selection == "fund_performance":
+        return {
+            "type": "tool",
+            "tool": "compare_periods",
+            "arguments": {"entity": resolved_fund, "metric": "fund_return_pct", "period_a": "Q1", "period_b": "Q4", "fund": resolved_fund},
+        }
+    if selection == "manager_performance":
+        if resolved_manager and resolved_manager.get("manager"):
+            return {"type": "tool", "tool": "get_manager_history", "arguments": {"manager": resolved_manager["manager"], "fund": resolved_manager.get("fund") or resolved_fund}}
+        return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": resolved_fund, "period": resolved_period, "metric": "excess_return", "direction": "ascending", "limit": 5}}
+    if selection == "allocation_history":
+        if resolved_asset:
+            return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": resolved_fund, "asset_class": resolved_asset}}
+        return {"type": "tool", "tool": "rank_asset_allocations", "arguments": {"fund": resolved_fund, "period": resolved_period, "direction": "largest_absolute", "limit": 5}}
+    return None
+
+
 def _context_from_tool_result(result: dict[str, Any]) -> dict[str, Any]:
     context: dict[str, Any] = {}
+    context["pending_clarification"] = {}
     for key in ("fund", "period", "asset_class", "manager", "metric"):
         if result.get(key) is not None:
             context[key] = result[key]
@@ -1113,7 +1209,7 @@ def _context_from_tool_result(result: dict[str, Any]) -> dict[str, Any]:
                 if first.get(key) is not None:
                     context[key] = first[key]
                     context[f"active_{key}"] = first[key]
-    elif tool in {"get_fund_performance", "rank_funds", "compare_funds"}:
+    elif tool in {"get_fund_performance", "rank_funds", "compare_funds", "compare_periods"}:
         context["active_dimension"] = "performance"
         rows = result.get("rows") or []
         funds = [row.get("fund") for row in rows if isinstance(row, dict) and row.get("fund")]
@@ -1177,7 +1273,16 @@ def _model_observation(result: dict[str, Any]) -> dict[str, Any]:
     if tool == "compare_funds":
         return {**base, "rows": [_compact_rank(row) for row in result.get("rows", [])], "comparison": result.get("comparison")}
     if tool == "compare_periods":
-        return {**base, "rows": [_compact_row(row, "period", "metric") for row in result.get("rows", [])], "comparison": result.get("comparison")}
+        return {
+            **base,
+            "entity": result.get("entity"),
+            "metric": result.get("metric"),
+            "period_a": result.get("period_a"),
+            "period_b": result.get("period_b"),
+            "fund": result.get("fund"),
+            "rows": [_compact_row(row, "period", "metric") for row in result.get("rows", [])],
+            "comparison": result.get("comparison"),
+        }
     if tool == "get_research_signals":
         return {**base, "rows": [_research_signal_for_model(row) for row in result.get("rows", [])[:5]]}
     if tool == "validate_reconciliation":
@@ -1482,6 +1587,12 @@ def _response_lead_in(user_message: str, observations: list[dict[str, Any]], con
         if asset:
             return f"On the {asset} comparison"
         return "On the fund comparison"
+    if tool == "compare_periods":
+        entity = result.get("entity") or context.get("active_fund") or context.get("fund") or "the selected item"
+        metric = str(result.get("metric") or "")
+        if metric == "fund_return_pct":
+            return f"On {entity}'s quarterly fund performance"
+        return f"On {entity}'s quarterly trend"
     if tool == "get_cash_flows":
         return f"On {fund or 'the fund'} cash flows"
     if tool == "validate_reconciliation":
@@ -1721,16 +1832,13 @@ def _suggest_clarification_options(answer: str, observations: list[dict[str, Any
     if observations or not _looks_like_clarification(answer):
         return []
     text = answer.lower()
+    if "quarterly" in text and ("fund" in text or "manager" in text or "allocation" in text):
+        return _quarterly_trend_options()
     if "absolute return" in text or "relative to benchmark" in text or "benchmark" in text or "consistent" in text:
         return [
             {"label": "Absolute return", "message": "Absolute return."},
             {"label": "Relative to benchmark", "message": "Relative to benchmark."},
             {"label": "Consistency over time", "message": "Consistency over time."},
-        ]
-    if "fund" in text and "manager" in text:
-        return [
-            {"label": "Fund", "message": "Fund."},
-            {"label": "Manager", "message": "Manager."},
         ]
     if "allocation" in text and "manager" in text:
         return [
@@ -1750,13 +1858,26 @@ def _suggest_clarification_options(answer: str, observations: list[dict[str, Any
             {"label": "Performance", "message": "Source the performance result."},
             {"label": "Allocation", "message": "Source the allocation result."},
         ]
-    if "which quarterly trend" in text:
-        return [
-            {"label": "Asset allocation", "message": "Asset allocation trend."},
-            {"label": "Manager performance", "message": "Manager performance trend."},
-            {"label": "Fund return", "message": "Fund return trend."},
-        ]
     return []
+
+
+def _quarterly_trend_options() -> list[dict[str, str]]:
+    return [
+        {"label": "Fund performance", "message": "Fund performance."},
+        {"label": "Manager performance", "message": "Manager performance."},
+        {"label": "Asset allocation", "message": "Asset allocation."},
+    ]
+
+
+def _quarterly_trend_selection(text: str) -> str | None:
+    cleaned = str(text or "").strip().lower().strip(".?!")
+    if cleaned in {"fund", "fund performance", "fund return", "fund returns", "returns"}:
+        return "fund_performance"
+    if cleaned in {"manager", "manager performance", "manager returns", "managers"}:
+        return "manager_performance"
+    if cleaned in {"asset allocation", "allocation", "allocation history", "allocation trend"}:
+        return "allocation_history"
+    return None
 
 
 def _looks_like_clarification(answer: str) -> bool:
@@ -2384,6 +2505,13 @@ def _latest_human_contains(messages: list[BaseMessage], *terms: str) -> bool:
             text = str(message.content).lower()
             return any(term in text for term in terms)
     return False
+
+
+def _latest_human_text(messages: list[BaseMessage]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return str(message.content)
+    return ""
 
 
 def _has_any(text: str, *terms: str) -> bool:
