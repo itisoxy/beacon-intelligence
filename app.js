@@ -546,7 +546,10 @@ async function runAsk(query) {
         application_context: askCurrentContext()
       })
     });
-    const payload = await response.json();
+    const contentType = response.headers.get("content-type") || "";
+    const payload = contentType.includes("application/json")
+      ? await response.json()
+      : { ok: false, error: { message: await response.text() || "Ask Beacon did not return a JSON response." } };
     if (!response.ok || !payload.ok) throw new Error(payload.error?.message || "Ask Beacon failed.");
     state.ask.threadId = payload.thread_id || state.ask.threadId;
     const result = normalizeAskResponse(payload);
