@@ -151,30 +151,6 @@ class ToolSelectingTestAdapter:
         self.calls += 1
         if isinstance(messages[-1], ToolMessage):
             result = json.loads(str(messages[-1].content))
-            if result.get("tool") == "get_research_signals" and result.get("ok") and result.get("rows"):
-                signal = result["rows"][0]
-                if signal.get("asset_class"):
-                    return _tool_call_message(
-                        "get_asset_allocation",
-                        {"fund": signal.get("fund") or _application_context_from_messages(messages).get("fund") or "BPT", "period": signal.get("horizon") or "FY2026", "asset_class": signal["asset_class"]},
-                    )
-                if signal.get("manager"):
-                    return _tool_call_message(
-                        "get_manager_performance",
-                        {"manager": signal["manager"], "fund": signal.get("fund"), "period": signal.get("horizon") or "FY2026", "asset_class": signal.get("asset_class")},
-                    )
-            if result.get("tool") == "rank_managers" and result.get("ok") and result.get("rows"):
-                index = 1 if _latest_human_contains(messages, "second best") and len(result["rows"]) > 1 else 0
-                top = result["rows"][index]
-                return _tool_call_message(
-                    "get_manager_performance",
-                    {
-                        "manager": top["manager"],
-                        "fund": top["fund"],
-                        "period": result["period"],
-                        "asset_class": top["asset_class"],
-                    },
-                )
             return AIMessage(content=_answer_from_tool_result(result, messages))
 
         human_messages = [str(message.content) for message in messages if isinstance(message, HumanMessage)]
@@ -211,6 +187,7 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
     asset_class = asset_class or recent_asset_class
     previous_manager = _latest_manager_from_tool_messages(messages)
     previous_asset = _latest_asset_from_tool_messages(messages) or asset_class
+    comparison_fund = recent_context.get("comparison_fund") or context.get("comparison_fund")
 
     if _has_any(text, "q8", "q5"):
         return {"type": "tool", "tool": "get_fund_performance", "arguments": {"fund": fund or "BPT", "period": "Q8" if "q8" in text else "Q5"}}
@@ -233,14 +210,40 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
         signal_id = _latest_research_signal_id(messages, context)
         if signal_id:
             return {"type": "tool", "tool": "get_research_signals", "arguments": {"fund": fund, "period": period, "asset_class": asset_class}}
+        if recent_context.get("last_response_type") == "fund_comparison":
+            return {"type": "tool", "tool": "compare_funds", "arguments": {"metric": recent_context.get("metric") or "fund_excess_return_pp", "period": period}}
         if previous_manager:
-            return {"type": "tool", "tool": "get_manager_history", "arguments": {"manager": previous_manager["manager"], "fund": previous_manager.get("fund") or fund}}
+            return {"type": "tool", "tool": "get_manager_performance", "arguments": previous_manager}
         if previous_asset:
             return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": fund or "BPT", "asset_class": previous_asset}}
         return {"type": "answer", "answer": "The prior Beacon result is worth attention because it identifies a sourced area for follow-up, but the dataset does not establish a causal explanation on its own."}
 
     if _has_any(text, "what about managers", "managers?"):
         return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": period, "asset_class": asset_class, "metric": "excess_return", "direction": "ascending", "limit": 5}}
+
+    if _has_any(text, "mgr", "manager") and _has_any(text, "worst", "weakest", "underperform", "q4"):
+        return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": explicit_period or period or "Q4", "metric": "excess_return", "direction": "ascending", "limit": 1}}
+
+    if explicit_period and comparison_fund and recent_context.get("last_response_type") == "fund_comparison":
+        return {"type": "tool", "tool": "compare_funds", "arguments": {"metric": recent_context.get("metric") or "fund_excess_return_pp", "period": explicit_period}}
+
+    if explicit_period and _is_period_followup(text):
+        return {"type": "tool", "tool": "get_fund_performance", "arguments": {"fund": fund or "BPT", "period": explicit_period}}
+
+    if _has_any(text, "relative to benchmark", "against benchmark") and comparison_fund:
+        return {"type": "tool", "tool": "rank_funds", "arguments": {"period": period, "metric": "fund_excess_return_pp", "direction": "descending"}}
+
+    if _has_any(text, "which fund performed best", "which fund did best", "which fund was best"):
+        return {"type": "clarify", "question": "Do you mean highest absolute return or strongest return relative to benchmark?"}
+
+    if _has_any(text, "absolute return") and _has_any(prior, "which fund performed best", "which fund did best", "which fund was best"):
+        return {"type": "tool", "tool": "rank_funds", "arguments": {"period": period, "metric": "fund_return_pct", "direction": "descending"}}
+
+    if _has_any(text, "relative to benchmark", "against benchmark") and _has_any(prior, "which fund performed best", "which fund did best", "which fund was best"):
+        return {"type": "tool", "tool": "rank_funds", "arguments": {"period": period, "metric": "fund_excess_return_pp", "direction": "descending"}}
+
+    if asset_class and recent_context.get("active_dimension") == "allocation" and _has_any(text, "what about", "and "):
+        return {"type": "tool", "tool": "get_asset_allocation", "arguments": {"fund": fund or "BPT", "period": period, "asset_class": asset_class}}
 
     if _has_any(text, "asset allocation trend"):
         if asset_class or previous_asset:
@@ -278,24 +281,26 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
             return {"type": "tool", "tool": "get_manager_history", "arguments": {"manager": previous_manager["manager"], "fund": previous_manager.get("fund") or fund}}
         return {"type": "clarify", "question": "Which quarterly trend should I show: an asset allocation trend, manager performance trend, or fund return trend?"}
 
-    if _has_any(text, "and ble", "what about ble", "ble?"):
+    if _is_fund_followup(text, "BLE"):
         if previous_asset:
             return {"type": "tool", "tool": "get_asset_allocation", "arguments": {"fund": "BLE", "period": period, "asset_class": previous_asset}}
         return {"type": "tool", "tool": "get_fund_performance", "arguments": {"fund": "BLE", "period": period}}
 
-    if _has_any(text, "and bpt", "what about bpt", "bpt?"):
+    if _is_fund_followup(text, "BPT"):
         if previous_asset:
             return {"type": "tool", "tool": "get_asset_allocation", "arguments": {"fund": "BPT", "period": period, "asset_class": previous_asset}}
         return {"type": "tool", "tool": "get_fund_performance", "arguments": {"fund": "BPT", "period": period}}
 
     if _has_any(text, "has that worsened", "has it worsened", "has this worsened", "has that got worse", "has it got worse"):
-        if previous_asset:
-            return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": fund or recent_context.get("fund") or "BPT", "asset_class": previous_asset}}
         if previous_manager:
             return {"type": "tool", "tool": "get_manager_history", "arguments": {"manager": previous_manager["manager"], "fund": previous_manager.get("fund") or fund}}
+        if previous_asset:
+            return {"type": "tool", "tool": "get_allocation_history", "arguments": {"fund": fund or recent_context.get("fund") or "BPT", "asset_class": previous_asset}}
         return {"type": "clarify", "question": "Do you mean the allocation drift, manager result, or fund performance?"}
 
     if _has_any(text, "the worst one", "worst one", "weakest one", "lowest one"):
+        if recent_context.get("active_dimension") == "manager" or previous_manager:
+            return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": period, "asset_class": asset_class, "metric": _latest_rank_metric(messages) or "excess_return", "direction": "ascending", "limit": 1}}
         if recent_context.get("active_dimension") == "allocation" or previous_asset:
             return {"type": "tool", "tool": "rank_asset_allocations", "arguments": {"fund": fund or "BPT", "period": period, "direction": "largest_absolute", "limit": 1}}
         return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": period, "asset_class": asset_class, "metric": _latest_rank_metric(messages) or "excess_return", "direction": "ascending", "limit": 1}}
@@ -383,7 +388,7 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
     if _has_any(text, "consistent", "consistency"):
         return {"type": "tool", "tool": "rank_managers", "arguments": {"fund": fund, "period": period, "metric": "consistency", "direction": "descending", "limit": 1}}
 
-    if _has_any(text, "how are we doing", "actually finish", "did we do alright", "number looking", "portfolio", "return", "look off", "anything look off"):
+    if _has_any(text, "how are we doing", "actually finish", "did we do alright", "number looking", "portfolio", "return", "perf", "look off", "anything look off"):
         if not fund:
             return {"type": "clarify", "question": "Which fund should I use, BPT or BLE?"}
         return {"type": "tool", "tool": "get_fund_performance", "arguments": {"fund": fund, "period": period}}
@@ -1141,6 +1146,26 @@ def _model_observation(result: dict[str, Any]) -> dict[str, Any]:
         return {**base, **_pick_metrics(result, "market_value", "actual_allocation_pct", "policy_target_pct", "allocation_drift_pp", "dollar_variance_to_policy"), "status": result.get("status")}
     if tool == "get_allocation_history":
         return {**base, "history": [_compact_row(row, "period", "actual_allocation_pct", "policy_target_pct", "allocation_drift_pp") for row in result.get("history", [])]}
+    if tool == "rank_asset_allocations":
+        return {
+            **base,
+            "fund": result.get("fund"),
+            "period": result.get("period"),
+            "direction": result.get("direction"),
+            "rows": [
+                {
+                    "fund": row.get("fund"),
+                    "period": row.get("period"),
+                    "asset_class": row.get("asset_class"),
+                    "status": row.get("status"),
+                    "metrics": {
+                        key: _metric_for_model(value)
+                        for key, value in (row.get("metrics") or {}).items()
+                    },
+                }
+                for row in result.get("rows", [])[:5]
+            ],
+        }
     if tool in {"rank_funds", "rank_managers"}:
         return {**base, "rows": [_compact_rank(row) for row in result.get("rows", [])[:5]]}
     if tool == "get_manager_performance":
@@ -1674,9 +1699,11 @@ def _suggest_followups(observations: list[dict[str, Any]], context: dict[str, An
     other_fund = "BLE" if context.get("fund") == "BPT" else "BPT" if context.get("fund") == "BLE" else "BLE"
     suggestions: list[str]
     if tool == "compare_funds":
-        suggestions = ["Relative to benchmark", "Show quarterly trend", "Compare allocation", "Source"]
+        metric = str((result or {}).get("metric") or context.get("active_metric") or context.get("metric") or "")
+        suggestions = ["Show quarterly trend", "Compare allocation", "Source"] if "excess" in metric else ["Relative to benchmark", "Show quarterly trend", "Compare allocation", "Source"]
     elif tool in {"get_fund_performance", "rank_funds"}:
-        suggestions = [f"Compare with {other_fund}", "Relative to benchmark", "Show quarterly performance", "Source"]
+        metric = str((result or {}).get("metric") or context.get("active_metric") or context.get("metric") or "")
+        suggestions = [f"Compare with {other_fund}", "Show quarterly performance", "Source"] if "excess" in metric else [f"Compare with {other_fund}", "Relative to benchmark", "Show quarterly performance", "Source"]
     elif tool in {"rank_managers", "get_manager_performance", "get_manager_history"}:
         suggestions = ["Show quarterly history", "Compare next worst", f"And {other_fund}?", "Source"]
     elif tool in {"get_asset_allocation", "get_allocation_history", "rank_asset_allocations"}:
@@ -2130,6 +2157,18 @@ def _answer_from_tool_result(result: dict[str, Any], messages: list[BaseMessage]
             f"{row['manager']} returned {manager_return:.2f}% against a benchmark return of "
             f"{benchmark_return:.2f}% in {row['period']}, producing {excess_return:+.2f}pp of excess return."
         )
+    if tool == "get_manager_history":
+        history = result.get("history") or []
+        if history:
+            first = history[0]
+            last = history[-1]
+            first_excess = first["manager_excess_return_pp"]["value"]
+            last_excess = last["manager_excess_return_pp"]["value"]
+            direction = "worsened" if last_excess < first_excess else "improved" if last_excess > first_excess else "held steady"
+            return (
+                f"{last['manager']}'s benchmark-relative result {direction} from {first['period']} to {last['period']}: "
+                f"excess return moved from {first_excess:+.2f}pp to {last_excess:+.2f}pp."
+            )
     if tool == "get_cash_flows":
         return (
             f"{result['fund']} had net cash flow of {result['net_cash_flow']['value']:.2f} USD millions "
@@ -2348,6 +2387,19 @@ def _is_comparison_followup(text: str, explicit_fund: str | None, context: dict[
         "better",
         "worse",
     )
+
+
+def _is_period_followup(text: str) -> bool:
+    cleaned = text.strip().lower().strip(".?!")
+    if cleaned in {"q1", "q2", "q3", "q4", "h1", "h2", "fy2026"}:
+        return True
+    return cleaned in {f"what about {period}" for period in ("q1", "q2", "q3", "q4", "h1", "h2", "fy2026")}
+
+
+def _is_fund_followup(text: str, fund: str) -> bool:
+    cleaned = text.strip().lower().strip(".?!")
+    fund_text = fund.lower()
+    return cleaned in {fund_text, f"and {fund_text}", f"what about {fund_text}"}
 
 
 def _clean_optional_text(value: Any) -> str | None:

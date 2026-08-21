@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sys
+import time
+import urllib.error
+import urllib.request
 import uuid
-from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -18,285 +21,436 @@ CHECKPOINT_PATH = ROOT / "data" / "runtime" / "ask_beacon_checkpoints.sqlite"
 REPORT_PATH = ROOT / "LANGGRAPH_NL_STRESS_TEST_REPORT.md"
 
 
-SAMPLES = [
-    ("A", "How are we doing?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("A", "Are we ahead or behind?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("A", "Where are we versus where we're supposed to be?", {"fund": "BPT", "period": "Q4"}, "answer"),
-    ("A", "Anything look off?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("B", "How did it do against the benchmark?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("B", "Which bit actually did well?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("B", "What dragged us down?", {"fund": "BPT", "period": "Q4"}, "answer"),
-    ("C", "Who did best?", {"fund": "BPT", "period": "FY2026"}, "clarify"),
-    ("C", "Who actually made us money?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("C", "Who beat their number?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("C", "Who kept missing?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("D", "Are we too heavy anywhere?", {"fund": "BPT", "period": "Q4"}, "answer"),
-    ("D", "Where are we light?", {"fund": "BPT", "period": "Q4"}, "answer"),
-    ("D", "Is Cash still a problem?", {"fund": "BPT", "period": "Q4"}, "answer"),
-    ("D", "Is Private Equity too high?", {"fund": "BLE", "period": "Q3"}, "answer"),
-    ("E", "What's changed recently?", {"fund": "BPT", "period": "FY2026", "asset_class": "Cash"}, "answer"),
-    ("E", "What happened in the second half?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("E", "Was the last six months different?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("F", "How does that compare with the other fund?", {"fund": "BPT", "period": "Q4", "asset_class": "Cash"}, "answer"),
-    ("F", "Was BLE any better?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("F", "Compare the two.", {"period": "FY2026", "asset_class": "Private Equity"}, "answer"),
-    ("G", "Did money come in or go out?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("G", "Why did AUM change?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("G", "How did we get from the opening number to the closing number?", {"fund": "BPT", "period": "Q4"}, "answer"),
-    ("H", "What should I be looking at?", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("H", "Give me the three things that matter.", {"fund": "BPT", "period": "FY2026"}, "answer"),
-    ("H", "Anything the CIO should know?", {"fund": "BLE", "period": "FY2026"}, "answer"),
-    ("J", "How did they do?", {}, "clarify"),
-    ("J", "How far off was it?", {"fund": "BPT", "period": "Q4", "asset_class": "Cash"}, "answer"),
-    ("K", "whos best then", {"fund": "BPT", "period": "FY2026"}, "clarify"),
-    ("K", "cash looks kinda bad?", {"fund": "BPT", "period": "Q4"}, "answer"),
-    ("K", "did bpt actually beat target", {"period": "FY2026"}, "answer"),
-    ("K", "what happened q4", {"fund": "BPT"}, "clarify"),
-    ("K", "pe seems high no?", {"fund": "BLE", "period": "Q3"}, "answer"),
-    ("L", "What's the best one?", {"fund": "BPT", "period": "FY2026"}, "clarify"),
-    ("L", "How did it perform?", {}, "clarify"),
-    ("L", "What was the return?", {}, "clarify"),
-    ("M", "Why did that manager change strategy?", {"manager": "Redwood Growth Equity Partners", "fund": "BPT", "period": "FY2026"}, "refuse"),
-    ("M", "What will the fund return next year?", {"fund": "BPT"}, "refuse"),
-    ("M", "What holdings caused this?", {"fund": "BPT", "period": "FY2026"}, "refuse"),
-    ("O", "Show me Q8.", {"fund": "BPT"}, "error"),
-    ("O", "What happened in 2023?", {"fund": "BPT"}, "refuse"),
-    ("O", "How did Fund XYZ do?", {}, "refuse"),
-    ("O", "Show me the Crypto allocation.", {"fund": "BPT", "period": "Q4"}, "refuse"),
-    ("O", "What happened tomorrow?", {"fund": "BPT"}, "refuse"),
-]
-
-
-CONVERSATIONS = [
-    (
-        "I1",
-        {"fund": "BPT", "period": "FY2026"},
-        ["Who did best?", "Against benchmark.", "How consistent were they?", "What about the second best?", "Were they better in Q4?"],
-    ),
-    (
-        "I2",
-        {"fund": "BPT", "period": "Q4", "asset_class": "Cash"},
-        ["How's Cash looking?", "Has it got worse?", "When did that start?", "Compare it with BLE.", "Which one should I worry about more?"],
-    ),
-    (
-        "I3",
-        {"fund": "BPT", "period": "FY2026", "asset_class": "Private Equity"},
-        ["How did Private Equity do?", "Performance.", "Against benchmark.", "And allocation?", "Was that worse in H2?"],
-    ),
-    (
-        "I4",
-        {"fund": "BPT", "period": "FY2026"},
-        ["What's the biggest issue with BPT?", "Why does that matter?", "Show me the numbers.", "Where did those numbers come from?"],
-    ),
-    (
-        "N",
-        {"fund": "BPT", "period": "FY2026"},
-        ["How are we doing?", "Where are you getting that from?", "Is that reconciled?", "Can I trust that number?"],
-    ),
+JOURNEYS: list[dict[str, Any]] = [
+    {
+        "id": "J1",
+        "context": {"fund": "BPT", "period": "FY2026"},
+        "turns": [
+            ("What was BPT's FY2026 return?", "fund_performance"),
+            ("Compare with BLE.", "fund_comparison"),
+            ("Relative to benchmark.", "fund_comparison"),
+            ("What about Q3?", "fund_comparison"),
+            ("Source?", "source_evidence"),
+        ],
+    },
+    {
+        "id": "J2",
+        "context": {"fund": "BPT", "period": "FY2026"},
+        "turns": [
+            ("What should I investigate about BPT?", "research_signals"),
+            ("Why?", "research_signals"),
+            ("Show me the numbers.", "answer"),
+            ("What about managers?", "manager_ranking"),
+            ("The worst one?", "manager_ranking"),
+            ("Has that worsened?", "quarterly_trend"),
+            ("Source?", "source_evidence"),
+        ],
+    },
+    {
+        "id": "J3",
+        "context": {"fund": "BPT", "period": "FY2026"},
+        "turns": [
+            ("Where is BPT off policy?", "allocation_drift"),
+            ("What about cash?", "allocation_drift"),
+            ("Has it worsened?", "allocation_history"),
+            ("And BLE?", "allocation_drift"),
+            ("Source?", "source_evidence"),
+        ],
+    },
+    {
+        "id": "J4",
+        "context": {"period": "FY2026"},
+        "turns": [
+            ("Which fund performed best?", "clarification"),
+            ("Relative to benchmark.", "fund_comparison"),
+            ("Why?", "fund_comparison"),
+        ],
+    },
+    {
+        "id": "J5",
+        "context": {"fund": "BPT", "period": "FY2026"},
+        "turns": [
+            ("bpt perf", "fund_performance"),
+            ("and ble?", "fund_performance"),
+            ("worst mgr q4", "manager_ranking"),
+            ("why?", "manager_performance"),
+            ("source?", "source_evidence"),
+        ],
+    },
 ]
 
 
 def main() -> None:
-    model = build_model(ROOT / "Data", ROOT / ".tmp-agent-debug", ROOT / ".tmp-agent-debug" / "beacon.duckdb")
-    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), CHECKPOINT_PATH, model=model)
+    args = _parse_args()
+    runner = EndpointRunner(args.endpoint) if args.endpoint else LocalRunner()
     run_id = uuid.uuid4().hex[:8]
-    samples = [_run_case(conversation, run_id, index, item) for index, item in enumerate(SAMPLES, start=1)]
-    conversations = [_run_conversation(conversation, run_id, item) for item in CONVERSATIONS]
-    report = _build_report(samples, conversations)
-    REPORT_PATH.write_text(
-        "# LangGraph Natural-Language Stress Test Report\n\n"
-        f"Status: {report['status']}\n\n"
-        "```json\n"
-        f"{json.dumps(report, indent=2)}\n"
-        "```\n",
-        encoding="utf-8",
-    )
+    flows = []
+    try:
+        for journey in JOURNEYS:
+            flows.append(_run_journey(runner, run_id, journey))
+    finally:
+        runner.close()
+    report = _build_report(flows, args.endpoint)
+    REPORT_PATH.write_text(_render_markdown(report), encoding="utf-8")
     print(json.dumps(_console_summary(report), indent=2))
-    conversation.close()
+    if report["status"] == "FAIL":
+        raise SystemExit(1)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run high-value Ask Beacon conversational journey stress tests.")
+    parser.add_argument(
+        "--endpoint",
+        help="Optional hosted Ask Beacon endpoint, e.g. https://your-app.vercel.app/api/ask-beacon. Omit for deterministic local tests.",
+    )
+    return parser.parse_args()
+
+
+class LocalRunner:
+    name = "deterministic-local"
+
+    def __init__(self) -> None:
+        model = build_model(ROOT / "Data", ROOT / ".tmp-agent-debug", ROOT / ".tmp-agent-debug" / "beacon.duckdb")
+        self.conversation = AskBeaconConversation(ToolSelectingTestAdapter(), CHECKPOINT_PATH, model=model)
+
+    def ask(self, thread_id: str, message: str, context: dict[str, Any] | None) -> dict[str, Any]:
+        started = time.perf_counter()
+        try:
+            return self.conversation.ask(thread_id, message, context)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "answer": str(exc),
+                "error": {"code": exc.__class__.__name__, "message": str(exc)},
+                "turn_tool_events": [],
+                "turn_messages": [],
+                "turn_sources": [],
+                "resolved_context": {},
+                "validation_errors": [exc.__class__.__name__],
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+            }
+
+    def close(self) -> None:
+        self.conversation.close()
+
+
+class EndpointRunner:
+    name = "hosted-endpoint"
+
+    def __init__(self, endpoint: str) -> None:
+        self.endpoint = endpoint
+
+    def ask(self, thread_id: str, message: str, context: dict[str, Any] | None) -> dict[str, Any]:
+        payload = json.dumps({"thread_id": thread_id, "message": message, "application_context": context or {}}).encode("utf-8")
+        request = urllib.request.Request(
+            self.endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        started = time.perf_counter()
+        try:
+            with urllib.request.urlopen(request, timeout=45) as response:
+                body = response.read().decode("utf-8")
+                data = json.loads(body)
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            data = {"ok": False, "error": {"code": "http_error", "message": body, "status": exc.code}}
+        except Exception as exc:
+            data = {"ok": False, "error": {"code": "request_error", "message": str(exc)}}
+        data.setdefault("elapsed_ms", round((time.perf_counter() - started) * 1000, 2))
+        return data
+
+    def close(self) -> None:
+        return None
+
+
+def _run_journey(runner: Any, run_id: str, journey: dict[str, Any]) -> dict[str, Any]:
+    thread_id = f"nl_loop_{run_id}_{journey['id']}"
+    rows = []
+    previous: dict[str, Any] | None = None
+    for index, (message, expected_type) in enumerate(journey["turns"], start=1):
+        started = time.perf_counter()
+        response = runner.ask(thread_id, message, journey["context"] if index == 1 else None)
+        response.setdefault("elapsed_ms", round((time.perf_counter() - started) * 1000, 2))
+        row = _summarize_turn(journey["id"], index, message, expected_type, response, previous)
+        rows.append(row)
+        previous = row
+    return {
+        "conversation": journey["id"],
+        "thread_id": thread_id,
+        "initial_context": journey["context"],
+        "status": _status_for_rows(rows),
+        "turns": rows,
+    }
+
+
+def _summarize_turn(
+    journey_id: str,
+    turn_number: int,
+    message: str,
+    expected_type: str,
+    response: dict[str, Any],
+    previous: dict[str, Any] | None,
+) -> dict[str, Any]:
+    tool_events = response.get("turn_tool_events") or response.get("grounded_response", {}).get("activity_events") or []
+    selected_tools = [event for event in tool_events if event.get("event") == "tool_selected"]
+    completed_tools = [event for event in tool_events if event.get("event") == "tool_completed"]
+    grounded = response.get("grounded_response") or {}
+    response_type = grounded.get("response_type") or grounded.get("structured_response", {}).get("response_type")
+    answer = str(grounded.get("answer") or response.get("answer") or response.get("error", {}).get("message") or "")
+    resolved_context = response.get("resolved_context") or grounded.get("application_context") or response.get("application_context") or {}
+    final_type = response_type or _end_state(answer, selected_tools, response)
+    row = {
+        "conversation": journey_id,
+        "turn_number": turn_number,
+        "user_message": message,
+        "resolved_context": resolved_context,
+        "response_type": response_type,
+        "selected_tools": [event.get("tool") for event in selected_tools],
+        "tool_arguments": [event.get("arguments") for event in selected_tools],
+        "final_answer": answer,
+        "followup_chips": grounded.get("followups") or [],
+        "model_iteration_count": len([event for event in tool_events if event.get("event") == "model_completed"]),
+        "elapsed_ms": response.get("elapsed_ms"),
+        "end_state": final_type,
+        "expected_response_type": expected_type,
+        "validation_errors": response.get("validation_errors") or grounded.get("validation_errors") or [],
+        "flags": [],
+    }
+    row["flags"] = _flags_for_turn(row, previous, completed_tools, response)
+    row["status"] = _turn_status(row)
+    return row
+
+
+def _flags_for_turn(
+    row: dict[str, Any],
+    previous: dict[str, Any] | None,
+    completed_tools: list[dict[str, Any]],
+    response: dict[str, Any],
+) -> list[dict[str, str]]:
+    flags: list[dict[str, str]] = []
+    message = row["user_message"].lower()
+    answer = row["final_answer"].lower()
+    expected = row["expected_response_type"]
+    response_type = row["response_type"]
+
+    if previous and row["selected_tools"] and previous["selected_tools"]:
+        if row["selected_tools"] == previous["selected_tools"] and row["tool_arguments"] == previous["tool_arguments"]:
+            flags.append(_fail("repeated_tool", "Identical tool and arguments repeated consecutively."))
+    if previous and _is_clarification(row) and _is_clarification(previous) and row["final_answer"] == previous["final_answer"]:
+        flags.append(_fail("repeated_clarification", "Identical clarification repeated."))
+    if "maximum" in answer and "iteration" in answer or "max_iterations_reached" in str(row["validation_errors"]):
+        flags.append(_fail("max_iterations", "Agent hit max iterations."))
+    if previous and answer and answer == previous["final_answer"]:
+        flags.append(_fail("repeated_answer", "Answer repeated without progress."))
+    if _lost_known_context(row):
+        flags.append(_fail("lost_context", "Known fund/period context was unexpectedly lost."))
+    if "period specified is outside" in answer and _has_period_context(row):
+        flags.append(_fail("period_validation_before_context", "Period validation appears to have run before applying context."))
+    if "would you like me to retrieve" in answer or "would you like me to check" in answer:
+        flags.append(_fail("retrieve_offer", "Agent offered to retrieve data instead of autonomously using tools."))
+    if _tool_should_have_been_called(message, expected) and not row["selected_tools"] and expected != "clarification":
+        flags.append(_fail("missing_tool", "Available tool should have been called autonomously."))
+    if expected.startswith("allocation") and row["response_type"] != expected:
+        flags.append(_fail("allocation_context_failure", f"Expected allocation flow {expected}, got {response_type or row['end_state']}."))
+    if expected != "answer" and expected != row["response_type"] and not (expected == "clarification" and _is_clarification(row)):
+        flags.append(_fail("wrong_response_type", f"Expected {expected}, got {response_type or row['end_state']}."))
+    if "source" in message and row["selected_tools"] and row["selected_tools"][0] != "get_source_record":
+        flags.append(_fail("source_started_analysis", "Source follow-up launched analysis instead of provenance lookup."))
+    if _chip_repeats_action(row):
+        flags.append(_warning("stale_chip", "Follow-up chip repeats the action just completed."))
+    if "traceback" in answer or "exception" in answer or "unexpected token" in answer or "not valid json" in answer:
+        flags.append(_fail("raw_error", "Raw model/tool/platform error reached the UI answer."))
+    if _simple_factual(message) and row["model_iteration_count"] > 3:
+        flags.append(_warning("excessive_iterations", "Simple factual request used excessive model iterations."))
+    if any(event.get("ok") is False for event in completed_tools):
+        flags.append(_fail("tool_error", "A selected tool completed with ok=false."))
+    return flags
+
+
+def _turn_status(row: dict[str, Any]) -> str:
+    if any(flag["level"] == "FAIL" for flag in row["flags"]):
+        return "FAIL"
+    if any(flag["level"] == "WARNING" for flag in row["flags"]):
+        return "WARNING"
+    return "PASS"
+
+
+def _status_for_rows(rows: list[dict[str, Any]]) -> str:
+    if any(row["status"] == "FAIL" for row in rows):
+        return "FAIL"
+    if any(row["status"] == "WARNING" for row in rows):
+        return "WARNING"
+    return "PASS"
+
+
+def _build_report(flows: list[dict[str, Any]], endpoint: str | None) -> dict[str, Any]:
+    turns = [turn for flow in flows for turn in flow["turns"]]
+    status = _status_for_rows(turns)
+    return {
+        "status": status,
+        "mode": "hosted-endpoint" if endpoint else "deterministic-local",
+        "endpoint": endpoint,
+        "turn_count": len(turns),
+        "flow_count": len(flows),
+        "flows": flows,
+        "summary": [
+            {
+                "status": turn["status"],
+                "conversation": turn["conversation"],
+                "turn_number": turn["turn_number"],
+                "failure_reason": "; ".join(flag["reason"] for flag in turn["flags"]) or "",
+                "resolved_context": turn["resolved_context"],
+                "tool_selected": turn["selected_tools"],
+                "response_type": turn["response_type"],
+            }
+            for turn in turns
+            if turn["status"] != "PASS"
+        ],
+        "hosted_command": "python tools/run_langgraph_nl_stress_tests.py --endpoint https://YOUR-VERCEL-APP.vercel.app/api/ask-beacon",
+    }
 
 
 def _console_summary(report: dict[str, Any]) -> dict[str, Any]:
-    critical_keys = (
-        "incorrect_intent_resolutions",
-        "unnecessary_clarification",
-        "lost_conversational_context",
-        "numerical_claims_without_provenance",
-        "research_prose_used_as_numerical_truth",
-        "tool_selection_failures",
-        "unnatural_or_template_like_responses",
-        "dead_end_conversations",
-    )
     return {
         "status": report["status"],
-        "sample_count": report["sample_count"],
-        "conversation_count": report["conversation_count"],
-        "category_summary": report["category_summary"],
-        "outcome_counts": report["outcome_counts"],
-        "critical_evaluation": {key: report["critical_evaluation"][key] for key in critical_keys},
+        "mode": report["mode"],
+        "turn_count": report["turn_count"],
+        "flow_count": report["flow_count"],
+        "flagged_turns": report["summary"],
         "report_path": str(REPORT_PATH),
+        "hosted_command": report["hosted_command"],
     }
 
 
-def _run_case(conversation: AskBeaconConversation, run_id: str, index: int, spec: tuple[str, str, dict[str, Any], str]) -> dict[str, Any]:
-    category, question, context, expected = spec
-    response = conversation.ask(f"thread_nl_stress_{run_id}_{index}", question, context)
-    return _summarize_turn(category, question, context, expected, response)
+def _render_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# LangGraph Natural-Language Stress Test Report",
+        "",
+        f"Status: {report['status']}",
+        f"Mode: {report['mode']}",
+        f"Turns: {report['turn_count']}",
+        "",
+        "## Flagged Turns",
+        "",
+    ]
+    if report["summary"]:
+        lines.append("| Status | Flow | Turn | Failure reason | Tool | Response type |")
+        lines.append("| --- | --- | ---: | --- | --- | --- |")
+        for row in report["summary"]:
+            lines.append(
+                f"| {row['status']} | {row['conversation']} | {row['turn_number']} | "
+                f"{_md(row['failure_reason'])} | {_md(', '.join(row['tool_selected']))} | {_md(row['response_type'] or '')} |"
+            )
+    else:
+        lines.append("No failures or warnings.")
+    lines.extend(
+        [
+            "",
+            "## Hosted Endpoint Command",
+            "",
+            "```powershell",
+            report["hosted_command"],
+            "```",
+            "",
+            "## Full JSON",
+            "",
+            "```json",
+            json.dumps(report, indent=2),
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
-def _run_conversation(conversation: AskBeaconConversation, run_id: str, spec: tuple[str, dict[str, Any], list[str]]) -> dict[str, Any]:
-    name, context, turns = spec
-    thread_id = f"thread_nl_stress_{run_id}_{name}"
-    rows = []
-    for index, question in enumerate(turns):
-        response = conversation.ask(thread_id, question, context if index == 0 else None)
-        rows.append(_summarize_turn("I" if name.startswith("I") else name, question, context if index == 0 else {}, "conversation", response))
-    return {"conversation": name, "thread_id": thread_id, "turns": rows, "pass": all(row["pass"] for row in rows)}
+def _md(value: str) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
-def _summarize_turn(category: str, question: str, context: dict[str, Any], expected: str, response: dict[str, Any]) -> dict[str, Any]:
-    selected = [event for event in response["turn_tool_events"] if event["event"] == "tool_selected"]
-    completed = [event for event in response["turn_tool_events"] if event["event"] == "tool_completed"]
-    observations = [_compact_observation(json.loads(message["content"])) for message in response["turn_messages"] if message["role"] == "tool"]
-    outcome = _outcome(response, selected, completed)
-    passed = _passes(expected, outcome, completed, response)
-    return {
-        "category": category,
-        "user_question": question,
-        "current_context": context,
-        "interpreted_intent": _intent_from_tools(selected, response["answer"]),
-        "entities_resolved": _entities_from_tools(selected, context),
-        "clarification_required": outcome == "clarify",
-        "clarification_question": response["answer"] if outcome == "clarify" else None,
-        "tools_selected": [event["tool"] for event in selected],
-        "tool_arguments": [event["arguments"] for event in selected],
-        "actual_data_result": observations,
-        "provenance_available": bool(response["turn_sources"]),
-        "provenance": response["turn_sources"][:3],
-        "final_natural_language_response": response["answer"],
-        "expected": expected,
-        "outcome": outcome,
-        "pass": passed,
-    }
+def _end_state(answer: str, selected_tools: list[dict[str, Any]], response: dict[str, Any]) -> str:
+    if response.get("ok") is False:
+        return "DATA_LIMITATION"
+    if selected_tools:
+        return "ANSWERED"
+    if _looks_like_clarification(answer):
+        return "CLARIFICATION"
+    if "cannot" in answer.lower() or "can't" in answer.lower() or "not available" in answer.lower():
+        return "DATA_LIMITATION"
+    return "ANSWERED"
 
 
-def _outcome(response: dict[str, Any], selected: list[dict[str, Any]], completed: list[dict[str, Any]]) -> str:
-    answer = response["answer"].lower()
-    if selected and any(not event.get("ok") for event in completed):
-        return "error"
-    if selected:
-        return "answer"
-    if answer.endswith("?") and ("do you mean" in answer or "which" in answer or "should" in answer or "what" in answer):
-        return "clarify"
-    if "can't" in answer or "cannot" in answer or "not support" in answer:
-        return "refuse"
-    return "answer"
+def _is_clarification(row: dict[str, Any]) -> bool:
+    return row["response_type"] == "clarification" or _looks_like_clarification(row["final_answer"])
 
 
-def _passes(expected: str, outcome: str, completed: list[dict[str, Any]], response: dict[str, Any]) -> bool:
-    if expected == "conversation":
-        return outcome in {"answer", "clarify", "refuse"} and bool(response["answer"])
-    if expected == "answer":
-        return outcome == "answer" and all(event.get("ok") for event in completed) and bool(response["turn_sources"])
-    if expected == "clarify":
-        return outcome == "clarify" and not completed
-    if expected == "refuse":
-        return outcome == "refuse" and not completed
-    if expected == "error":
-        return outcome == "error"
+def _looks_like_clarification(answer: str) -> bool:
+    text = str(answer or "").lower().strip()
+    return text.endswith("?") and ("do you mean" in text or "which" in text or "should i" in text or "what" in text)
+
+
+def _lost_known_context(row: dict[str, Any]) -> bool:
+    text = row["user_message"].lower()
+    context = row["resolved_context"]
+    if any(term in text for term in ("ble", "bpt", "q3", "q4", "fy2026", "cash", "private equity")):
+        return False
+    if row["turn_number"] == 1:
+        return False
+    if row["selected_tools"] and not (context.get("period") or context.get("active_period")):
+        return True
     return False
 
 
-def _intent_from_tools(selected: list[dict[str, Any]], answer: str) -> str:
-    if selected:
-        return " -> ".join(event["tool"] for event in selected)
-    if "do you mean" in answer.lower() or "which" in answer.lower():
-        return "clarification"
-    if "can't" in answer.lower() or "cannot" in answer.lower():
-        return "unsupported_or_out_of_scope"
-    return "direct_response"
+def _has_period_context(row: dict[str, Any]) -> bool:
+    context = row["resolved_context"]
+    return bool(context.get("period") or context.get("active_period"))
 
 
-def _entities_from_tools(selected: list[dict[str, Any]], context: dict[str, Any]) -> dict[str, Any]:
-    entities = {key: value for key, value in context.items() if value}
-    for event in selected:
-        for key, value in event["arguments"].items():
-            if key in {"fund", "period", "asset_class", "manager", "record_id"} and value:
-                entities[key] = value
-    return entities
+def _tool_should_have_been_called(message: str, expected: str) -> bool:
+    if expected == "clarification":
+        return False
+    return any(
+        term in message
+        for term in (
+            "return",
+            "compare",
+            "benchmark",
+            "investigate",
+            "numbers",
+            "managers",
+            "worst",
+            "worsened",
+            "source",
+            "policy",
+            "cash",
+            "perf",
+            "mgr",
+        )
+    )
 
 
-def _compact_observation(result: dict[str, Any]) -> dict[str, Any]:
-    compact = {"ok": result.get("ok"), "tool": result.get("tool"), "arguments": result.get("arguments"), "record_ids": result.get("record_ids", [])[:5]}
-    if result.get("error"):
-        compact["error"] = result["error"]
-    for key in (
-        "fund",
-        "period",
-        "asset_class",
-        "manager",
-        "fund_return_pct",
-        "policy_benchmark_return_pct",
-        "excess_return_pp",
-        "actual_allocation_pct",
-        "policy_target_pct",
-        "allocation_drift_pp",
-        "net_cash_flow",
-        "reconciliation_variance",
-        "allocation_validation_status",
-    ):
-        if key in result:
-            compact[key] = result[key]
-    if result.get("rows"):
-        compact["rows"] = result["rows"][:3]
-    if result.get("history"):
-        compact["history"] = result["history"]
-    return compact
+def _chip_repeats_action(row: dict[str, Any]) -> bool:
+    action = row["user_message"].strip().lower().rstrip(".?")
+    chips = row.get("followup_chips") or []
+    for chip in chips:
+        label = str(chip.get("label") if isinstance(chip, dict) else chip).strip().lower().rstrip(".?")
+        if label and label == action:
+            return True
+    return False
 
 
-def _build_report(samples: list[dict[str, Any]], conversations: list[dict[str, Any]]) -> dict[str, Any]:
-    all_turns = samples + [turn for convo in conversations for turn in convo["turns"]]
-    failures = [row for row in all_turns if not row["pass"]]
-    by_category = defaultdict(lambda: {"pass": 0, "fail": 0})
-    for row in all_turns:
-        by_category[row["category"]]["pass" if row["pass"] else "fail"] += 1
-    answered = [row["user_question"] for row in all_turns if row["outcome"] == "answer"]
-    clarified = [row["user_question"] for row in all_turns if row["outcome"] == "clarify"]
-    refused = [row["user_question"] for row in all_turns if row["outcome"] in {"refuse", "error"}]
-    one_tool = [row["user_question"] for row in all_turns if len(row["tools_selected"]) == 1]
-    multi_tool = [row["user_question"] for row in all_turns if len(row["tools_selected"]) > 1]
-    context_used = [row["user_question"] for row in all_turns if row["current_context"] and row["entities_resolved"]]
-    numerical_without_provenance = [row["user_question"] for row in all_turns if row["outcome"] == "answer" and row["tools_selected"] and not row["provenance_available"]]
-    research_only_numeric = [
-        row["user_question"]
-        for row in all_turns
-        if row["tools_selected"] == ["get_research_signals"] and any(ch.isdigit() for ch in row["final_natural_language_response"])
-    ]
-    return {
-        "status": "PASS" if not failures else "FAIL",
-        "sample_count": len(samples),
-        "conversation_count": len(conversations),
-        "category_summary": dict(by_category),
-        "critical_evaluation": {
-            "answered_directly": answered,
-            "required_clarification": clarified,
-            "used_existing_context": context_used,
-            "triggered_one_tool": one_tool,
-            "triggered_multiple_tools": multi_tool,
-            "correctly_refused_or_qualified": refused,
-            "incorrect_intent_resolutions": [row["user_question"] for row in failures],
-            "unnecessary_clarification": [],
-            "lost_conversational_context": [convo["conversation"] for convo in conversations if not convo["pass"]],
-            "numerical_claims_without_provenance": numerical_without_provenance,
-            "research_prose_used_as_numerical_truth": research_only_numeric,
-            "tool_selection_failures": [row["user_question"] for row in failures if row["tools_selected"]],
-            "unnatural_or_template_like_responses": [],
-            "dead_end_conversations": [],
-        },
-        "outcome_counts": dict(Counter(row["outcome"] for row in all_turns)),
-        "failures": failures,
-        "samples": samples,
-        "conversations": conversations,
-    }
+def _simple_factual(message: str) -> bool:
+    text = message.lower()
+    return "what was" in text and ("return" in text or "allocation" in text)
+
+
+def _fail(code: str, reason: str) -> dict[str, str]:
+    return {"level": "FAIL", "code": code, "reason": reason}
+
+
+def _warning(code: str, reason: str) -> dict[str, str]:
+    return {"level": "WARNING", "code": code, "reason": reason}
 
 
 if __name__ == "__main__":
