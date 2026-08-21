@@ -2,18 +2,24 @@
 Beacon Intelligence is a prototype investment intelligence application built for the Beacon Capital Stewardship assessment.
 My approach to the build was deliberately problem first rather than technology first.
 I tend to work through projects using:
+--------------------------------------
 Problem → Solution → System → Delivery
+--------------------------------------
+
 So I didn't start by choosing an AI model and then looking for somewhere to use it.
 I started by looking at the funds, the type of user I was designing for, the information they would need and the questions they would realistically want answered.
 
 My approach
 
-1. Start with the fund and the user
+ Start with the fund and the user
+ ---------
 The first thing I looked at was the size and structure of the funds in the supplied data.
 From there I looked at the types of interfaces people working with larger enterprise and institutional portfolios are already familiar with.
 
 The UI was influenced by platforms such as Salesforce, alongside institutional investment platforms such as BlackRock Aladdin.
-I wasn't trying to recreate either product. I wanted Beacon to feel familiar:
+I wasn't trying to recreate either product. 
+
+I wanted Beacon to feel familiar:
 clear navigation
 portfolio-level summaries
 drill-down reporting
@@ -22,11 +28,14 @@ evidence behind important numbers
 the ability to move from a high-level question into deeper analysis
 I wanted the result to feel closer to an internal investment intelligence product than a dashboard built purely for an assessment.
 
-3. Use reporting experience to shape the analytics layer
+Use reporting experience to shape the analytics layer
+----------
    
 I also drew on my previous experience building and pulling reports in Salesforce when deciding how to segment Beacon's analytics layer.
+
 That experience had already made me used to thinking about reporting through different dimensions, filters and levels of detail rather than treating a dataset as one large table.
 I carried that mindset into Beacon.
+
 It influenced the way I segmented the data around:
 fund
 reporting period
@@ -41,7 +50,9 @@ supporting evidence
 It also influenced the UX.
 Rather than showing everything at once, I wanted the user to be able to start at portfolio level and progressively drill into the part of the data that mattered.
 
-5. Work backwards from the UX
+Work backwards from the UX
+------------------
+
 I worked backwards from the experience I wanted the user to have.
 Before designing the AI architecture, I thought about the kinds of questions a CIO or investment team would most likely ask.
 For example:
@@ -63,7 +74,9 @@ The research layer, identifying things in the supplied data that may deserve att
 Ask Beacon
 The conversational layer, allowing the user to interrogate both the portfolio data and the research using natural language.
 So the build broadly worked backwards like this:
-```text
+
+
+
 Understand the fund and user
             ↓
     Design the experience
