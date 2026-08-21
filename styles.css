@@ -671,6 +671,24 @@ tr.clickable:hover { background: #f7faff; }
   justify-items: center;
   gap: 16px;
 }
+.ask-shell.has-answer .ask-hero {
+  position: sticky;
+  top: 0;
+  z-index: 12;
+  padding: 10px 0 14px;
+  background: rgba(248, 246, 241, .96);
+  border-bottom: 1px solid rgba(207, 216, 216, .75);
+  backdrop-filter: blur(10px);
+}
+.ask-shell.has-answer .ask-hero h2 {
+  font-size: 34px;
+}
+.ask-shell.has-answer .ask-hero > p {
+  display: none;
+}
+.ask-shell.has-answer .ask-search {
+  margin-top: 0;
+}
 .ask-hero h2 {
   font-size: 48px;
   line-height: 1.05;

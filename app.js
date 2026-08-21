@@ -274,21 +274,21 @@ function askResult(result) {
 function askConversation() {
   return `<div class="ask-answer-wrap">
     <div class="ask-thread">
-      ${state.ask.messages.map(askMessage).join("")}
+      ${state.ask.messages.map((message, index) => askMessage(message, index)).join("")}
       ${state.ask.loading && state.ask.status ? `<article class="ask-message beacon ask-loading"><p class="eyebrow">Beacon</p><h3>${escapeHtml(state.ask.status)}<span>${escapeHtml(state.ask.loadingDots)}</span></h3></article>` : ""}
       ${state.ask.error ? `<article class="ask-message beacon ask-error"><p class="eyebrow">Beacon</p><h3>${escapeHtml(state.ask.error)}</h3></article>` : ""}
     </div>
     ${state.ask.result && state.ask.result.outcome !== "clarify" ? askFollowups(state.ask.result) : ""}
   </div>`;
 }
-function askMessage(message) {
+function askMessage(message, index = 0) {
   if (message.role === "user") {
-    return `<article class="ask-message user"><p class="eyebrow">User</p><h3>${escapeHtml(message.content)}</h3></article>`;
+    return `<article class="ask-message user" data-ask-message-index="${index}"><p class="eyebrow">User</p><h3>${escapeHtml(message.content)}</h3></article>`;
   }
   const result = message.result || {};
   const clarify = result.outcome === "clarify";
   const metrics = (result.metrics || []).slice(0, 4);
-  return `<article class="ask-message beacon ${clarify ? "ask-clarify" : ""}">
+  return `<article class="ask-message beacon ${clarify ? "ask-clarify" : ""}" data-ask-message-index="${index}">
     <p class="eyebrow">Beacon</p>
     ${askAnswerText(message.content)}
     ${metrics.length ? `<div class="ask-metrics">${metrics.map(askMetricCard).join("")}</div>` : ""}
@@ -539,6 +539,7 @@ async function runAsk(query) {
   state.ask.error = null;
   startAskLoadingUx(message);
   render();
+  scrollAskLatestMessage("user");
   try {
     const response = await fetch("/api/ask-beacon", {
       method: "POST",
@@ -560,6 +561,8 @@ async function runAsk(query) {
     state.ask.loading = false;
     clearAskLoadingUx();
     state.ask.messages = [...state.ask.messages, { role: "assistant", content: "", result }];
+    render();
+    scrollAskLatestMessage("beacon");
     await typeAskAnswer(result.answer);
   } catch (error) {
     state.ask.error = error.message || "Ask Beacon is unavailable.";
@@ -567,6 +570,7 @@ async function runAsk(query) {
     clearAskLoadingUx();
     state.ask.status = "";
     render();
+    scrollAskLatestMessage("beacon");
   }
 }
 function submitAskMessage(message) {
@@ -581,10 +585,25 @@ async function typeAskAnswer(answer) {
     if (!state.ask.messages[index]) return;
     state.ask.messages[index].content = text.slice(0, i);
     render();
+    if (i === 0) scrollAskLatestMessage("beacon");
     await new Promise(resolve => setTimeout(resolve, 12));
   }
   state.ask.messages[index].content = text;
   render();
+  scrollAskLatestMessage("beacon");
+}
+
+function scrollAskLatestMessage(role = "beacon") {
+  requestAnimationFrame(() => {
+    const scoped = [...document.querySelectorAll(role === "user" ? ".ask-message.user" : ".ask-message.beacon")];
+    const all = [...document.querySelectorAll(".ask-message")];
+    const target = scoped[scoped.length - 1] || all[all.length - 1];
+    if (!target) return;
+    const hero = document.querySelector(".ask-shell.has-answer .ask-hero");
+    const offset = (hero?.getBoundingClientRect().height || 0) + 18;
+    const top = target.getBoundingClientRect().top + window.scrollY - offset;
+    window.scrollTo({ top: Math.max(top, 0), behavior: "smooth" });
+  });
 }
 function startAskLoadingUx(message) {
   clearAskLoadingUx();
