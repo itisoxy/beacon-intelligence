@@ -207,17 +207,19 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
         return {"type": "answer", "answer": "The supplied Beacon data cannot establish that conclusion. I can show sourced performance, benchmark-relative results, allocation movement, cash flows, or provenance instead."}
 
     if _has_any(text, "source", "evidence", "where did that come from", "where did this come from"):
-        record_id = _latest_record_id(messages, context)
+        record_id = _latest_record_id(messages, recent_context)
         if record_id:
             return {"type": "tool", "tool": "get_source_record", "arguments": {"record_id": record_id}}
         return {"type": "clarify", "question": "Which result should I source: the latest performance result, allocation result, manager result, or research signal?"}
 
-    if text.strip() in {"why", "why?", "why is that", "why does that matter", "why does this matter"}:
-        signal_id = _latest_research_signal_id(messages, context)
+    if _is_research_signal_followup(text):
+        signal_id = _latest_research_signal_id(messages, recent_context)
         if signal_id:
             return {"type": "tool", "tool": "get_research_signals", "arguments": {"fund": fund, "period": period, "asset_class": asset_class, "signal_id": signal_id}}
         if recent_context.get("last_response_type") == "fund_comparison":
             return {"type": "tool", "tool": "compare_funds", "arguments": {"metric": recent_context.get("metric") or "fund_excess_return_pp", "period": period}}
+        if "signal" in text:
+            return {"type": "clarify", "question": "Which research signal should I explain?"}
         if previous_manager:
             return {"type": "tool", "tool": "get_manager_performance", "arguments": previous_manager}
         if previous_asset:
@@ -455,6 +457,36 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
         return {"type": "clarify", "question": "Which fund, asset class, or manager should I use?"}
 
     return {"type": "clarify", "question": "Can you clarify the specific Beacon item you mean?"}
+
+
+def _is_research_signal_followup(text: str) -> bool:
+    normalized = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    if normalized in {
+        "why",
+        "why?",
+        "why is that",
+        "why is that?",
+        "why does that matter",
+        "why does that matter?",
+        "why does this matter",
+        "why does this matter?",
+    }:
+        return True
+    return _has_any(
+        normalized,
+        "explain the top signal",
+        "explain top signal",
+        "explain that",
+        "explain this",
+        "tell me more about it",
+        "tell me more about that",
+        "show me the numbers",
+        "show the numbers",
+        "what should i check next",
+        "what should i look at next",
+        "has this worsened",
+        "has that worsened",
+    )
 
 
 class BeaconToolAdapter:
@@ -1206,9 +1238,22 @@ def _context_from_tool_result(result: dict[str, Any]) -> dict[str, Any]:
     if tool == "get_research_signals":
         rows = result.get("rows") or []
         context["active_dimension"] = "research"
-        context["last_research_signal_ids"] = [row.get("signal_id") or row.get("id") for row in rows[:3] if row.get("signal_id") or row.get("id")]
+        signal_ids = [row.get("signal_id") or row.get("id") for row in rows if row.get("signal_id") or row.get("id")]
+        context["last_research_signal_ids"] = signal_ids
         if rows:
             first = rows[0]
+            signal_id = first.get("signal_id") or first.get("id")
+            if signal_id:
+                context["research_signal_id"] = signal_id
+                context["primary_research_signal_id"] = signal_id
+            if first.get("headline"):
+                context["headline"] = first["headline"]
+            source_record_ids = first.get("source_record_ids") or first.get("record_ids") or []
+            if isinstance(source_record_ids, str):
+                source_record_ids = [source_record_ids]
+            if source_record_ids:
+                context["source_record_ids"] = source_record_ids
+                context["last_record_ids"] = source_record_ids
             for key in ("fund", "period", "asset_class", "manager"):
                 if first.get(key) is not None:
                     context[key] = first[key]
@@ -1243,7 +1288,7 @@ def _context_from_tool_result(result: dict[str, Any]) -> dict[str, Any]:
                 context["comparison_fund"] = funds[1]
     record_ids = sorted(_collect_record_ids(result))
     if record_ids:
-        context["last_record_ids"] = record_ids[:5]
+        context.setdefault("last_record_ids", record_ids[:5])
     context["last_tool_result"] = {
         "tool": tool,
         "response_type": context.get("last_response_type"),
@@ -2465,7 +2510,13 @@ def _recent_conversation_context(messages: list[BaseMessage], fallback: dict[str
             "active_metric",
             "comparison_fund",
             "last_response_type",
+            "research_signal_id",
+            "primary_research_signal_id",
+            "headline",
         ):
+            if result.get(key):
+                context[key] = result[key]
+        for key in ("last_research_signal_ids", "last_record_ids", "source_record_ids"):
             if result.get(key):
                 context[key] = result[key]
         tool = result.get("tool")
@@ -2474,6 +2525,20 @@ def _recent_conversation_context(messages: list[BaseMessage], fallback: dict[str
         rows = result.get("rows") or result.get("history") or []
         if rows and isinstance(rows[0], dict):
             first = rows[0]
+            if tool == "get_research_signals":
+                signal_ids = [row.get("signal_id") or row.get("id") for row in rows if isinstance(row, dict) and (row.get("signal_id") or row.get("id"))]
+                if signal_ids:
+                    context["last_research_signal_ids"] = signal_ids
+                    context["research_signal_id"] = signal_ids[0]
+                    context["primary_research_signal_id"] = signal_ids[0]
+                if first.get("headline"):
+                    context["headline"] = first["headline"]
+                source_record_ids = first.get("source_record_ids") or first.get("record_ids") or []
+                if isinstance(source_record_ids, str):
+                    source_record_ids = [source_record_ids]
+                if source_record_ids:
+                    context["source_record_ids"] = source_record_ids
+                    context["last_record_ids"] = source_record_ids
             for key in ("fund", "period", "asset_class", "manager"):
                 if first.get(key):
                     context[key] = first[key]
@@ -2485,8 +2550,13 @@ def _recent_conversation_context(messages: list[BaseMessage], fallback: dict[str
 
 
 def _latest_research_signal_id(messages: list[BaseMessage], context: dict[str, Any] | None = None) -> str | None:
-    if context and context.get("research_signal_id"):
-        return str(context["research_signal_id"])
+    if context:
+        for key in ("primary_research_signal_id", "research_signal_id"):
+            if context.get(key):
+                return str(context[key])
+        values = context.get("last_research_signal_ids")
+        if isinstance(values, list) and values:
+            return str(values[0])
     for message in reversed(messages):
         if not isinstance(message, ToolMessage):
             continue

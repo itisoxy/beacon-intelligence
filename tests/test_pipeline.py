@@ -686,6 +686,64 @@ def test_grounded_response_reports_invalid_period(model, tmp_path):
     conversation.close()
 
 
+def test_research_top_signal_followup_uses_previous_structured_result(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_research_followup.sqlite", model=model)
+    thread_id = "thread_research_top_signal"
+
+    first = conversation.ask(thread_id, "What should I investigate about BPT?", {"fund": "BPT", "period": "FY2026"})
+    top_signal_id = first["resolved_context"]["primary_research_signal_id"]
+
+    second = conversation.ask(thread_id, "Explain the top signal")
+
+    assert second["grounded_response"]["response_type"] == "research_signals"
+    assert second["resolved_context"]["active_fund"] == "BPT"
+    assert second["resolved_context"]["active_period"] == "FY2026"
+    assert second["resolved_context"]["primary_research_signal_id"] == top_signal_id
+    assert "clarify" not in second["answer"].lower()
+    assert any(event.get("tool") == "get_research_signals" for event in second["turn_tool_events"])
+    assert any(event.get("arguments", {}).get("signal_id") == top_signal_id for event in second["turn_tool_events"])
+    conversation.close()
+
+
+def test_research_why_followup_retains_same_signal(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_research_why.sqlite", model=model)
+    thread_id = "thread_research_why"
+
+    first = conversation.ask(thread_id, "What should I investigate about BPT?", {"fund": "BPT", "period": "FY2026"})
+    top_signal_id = first["resolved_context"]["primary_research_signal_id"]
+    conversation.ask(thread_id, "Explain the top signal")
+    third = conversation.ask(thread_id, "Why does this matter?")
+
+    assert third["grounded_response"]["response_type"] == "research_signals"
+    assert third["resolved_context"]["primary_research_signal_id"] == top_signal_id
+    assert any(event.get("arguments", {}).get("signal_id") == top_signal_id for event in third["turn_tool_events"])
+    conversation.close()
+
+
+def test_research_source_followup_uses_top_signal_evidence(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_research_source.sqlite", model=model)
+    thread_id = "thread_research_source"
+
+    first = conversation.ask(thread_id, "What should I investigate about BPT?", {"fund": "BPT", "period": "FY2026"})
+    expected_record_id = first["resolved_context"]["source_record_ids"][0]
+    second = conversation.ask(thread_id, "Show the evidence")
+
+    assert second["grounded_response"]["response_type"] == "source_evidence"
+    assert any(event.get("tool") == "get_source_record" for event in second["turn_tool_events"])
+    assert any(event.get("arguments", {}).get("record_id") == expected_record_id for event in second["turn_tool_events"])
+    conversation.close()
+
+
+def test_top_signal_followup_clarifies_without_prior_signal(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_research_isolated.sqlite", model=model)
+
+    result = conversation.ask("thread_research_isolated", "Explain the top signal")
+
+    assert "which research signal" in result["answer"].lower()
+    assert not any(event.get("tool") == "get_research_signals" for event in result["turn_tool_events"])
+    conversation.close()
+
+
 def test_grounded_response_reports_unknown_fund(model, tmp_path):
     adapter = BeaconToolAdapter(model)
     observation = adapter.get_fund_performance("XYZ", "Q4")
