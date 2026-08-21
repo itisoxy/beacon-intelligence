@@ -1085,6 +1085,7 @@ function askInsightDrawer() {
       <h3>${escapeHtml(headline)}</h3>
       ${contextLine ? `<p class="micro">${escapeHtml(contextLine)}</p>` : ""}
     </section>
+    ${signal ? askInsightExplanation(signal) : ""}
     <div class="ask-drawer-starters">${starters.map(askSuggestionButton).join("")}</div>
     ${askConversationInline()}
     <form class="ask-drawer-form" id="askDrawerForm">
@@ -1092,6 +1093,21 @@ function askInsightDrawer() {
       <button type="submit" ${state.ask.loading ? "disabled" : ""}>Ask</button>
     </form>
     <button class="text-action ask-open-full" data-open-full-ask="true">Open full Ask Beacon -&gt;</button>`;
+}
+function askInsightExplanation(signal) {
+  const metrics = Object.entries(signal.supporting_metrics || {}).slice(0, 5);
+  const explanations = Array.isArray(signal.possible_explanations) ? signal.possible_explanations.filter(Boolean).slice(0, 2) : [];
+  const checks = Array.isArray(signal.what_to_check_next) ? signal.what_to_check_next.filter(Boolean).slice(0, 3) : [];
+  return `<section class="ask-insight-explanation">
+    <p class="eyebrow">Beacon's read of the data</p>
+    <p>${escapeHtml(signal.observation || signal.headline || "This signal is supported by the research evidence shown on the card.")}</p>
+    ${signal.interpretation ? `<p>${escapeHtml(signal.interpretation)}</p>` : ""}
+    ${signal.why_it_matters ? `<p><strong>Why it matters:</strong> ${escapeHtml(signal.why_it_matters)}</p>` : ""}
+    ${metrics.length ? `<div class="ask-insight-metrics">${metrics.map(([key, value]) => `<div><span>${humanLabel(key)}</span><strong>${formatMetricValue(key, value)}</strong></div>`).join("")}</div>` : ""}
+    ${explanations.length ? `<div class="ask-insight-list"><span>Possible explanations</span><ul>${explanations.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    ${checks.length ? `<div class="ask-insight-list"><span>What to check next</span><ul>${checks.map(item => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>` : ""}
+    ${signal.cio_question ? `<p><strong>Question for consideration:</strong> ${escapeHtml(signal.cio_question)}</p>` : ""}
+  </section>`;
 }
 function formatAskEvidenceValue(metric) {
   const value = metric.unit === "USD millions" ? fmtMoney(metric.value) : metric.unit === "percent" ? fmtPct(metric.value, 2) : metric.unit === "percentage points" ? fmtPp(metric.value) : metric.value_text || metric.value;

@@ -364,6 +364,56 @@ tr.clickable:hover { background: #f7faff; }
   line-height: 1.35;
   margin: 4px 0 8px;
 }
+.ask-insight-explanation {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fbff;
+  padding: 16px;
+  margin-bottom: 14px;
+}
+.ask-insight-explanation p {
+  margin: 9px 0 0;
+  line-height: 1.55;
+  color: var(--ink);
+}
+.ask-insight-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+}
+.ask-insight-metrics div {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  padding: 10px;
+}
+.ask-insight-metrics span,
+.ask-insight-list span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: 4px;
+}
+.ask-insight-metrics strong {
+  display: block;
+  color: var(--ink);
+  font-size: 15px;
+}
+.ask-insight-list {
+  margin-top: 12px;
+}
+.ask-insight-list ul {
+  margin: 6px 0 0 18px;
+  padding: 0;
+}
+.ask-insight-list li {
+  margin: 5px 0;
+  line-height: 1.45;
+}
 .ask-drawer-starters {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
