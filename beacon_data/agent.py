@@ -151,7 +151,7 @@ class ToolSelectingTestAdapter:
         self.calls += 1
         if isinstance(messages[-1], ToolMessage):
             result = json.loads(str(messages[-1].content))
-            return AIMessage(content=_answer_from_tool_result(result, messages))
+            return AIMessage(content=_safe_answer_from_tool_result(result, messages))
 
         human_messages = [str(message.content) for message in messages if isinstance(message, HumanMessage)]
         latest = human_messages[-1].lower() if human_messages else ""
@@ -971,7 +971,7 @@ def build_ask_beacon_graph(adapter: ChatModelAdapter, checkpointer: SqliteSaver,
     def respond_node(state: AskBeaconState) -> dict[str, Any]:
         result = (state.get("tool_results") or [])[-1]
         return {
-            "messages": [AIMessage(content=_answer_from_tool_result(result, state.get("messages", [])))],
+            "messages": [AIMessage(content=_safe_answer_from_tool_result(result, state.get("messages", [])))],
             "tool_events": [{"event": "structured_response_completed", "response_type": result.get("response_type")}],
             "sources": [],
             "tool_results": [],
@@ -1381,7 +1381,7 @@ def _fallback_answer_from_observations(observations: list[dict[str, Any]], turn_
     for result in reversed(observations):
         if result.get("ok") and _extract_metric_payloads(result):
             try:
-                return _answer_from_tool_result(result, _base_messages_from_dicts(turn_messages))
+                return _safe_answer_from_tool_result(result, _base_messages_from_dicts(turn_messages))
             except (KeyError, IndexError, TypeError, ValueError):
                 return None
     return None
@@ -2069,6 +2069,18 @@ def _collect_provenance_entries(value: Any) -> list[dict[str, Any]]:
     return deduped
 
 
+def _safe_answer_from_tool_result(result: dict[str, Any], messages: list[BaseMessage] | None = None) -> str:
+    try:
+        return _answer_from_tool_result(result, messages)
+    except (KeyError, IndexError, TypeError, ValueError):
+        tool = result.get("tool")
+        if tool in {"rank_asset_allocations", "get_asset_allocation", "get_allocation_history"}:
+            return "I retrieved the allocation data, but could not format one of the allocation fields safely."
+        if tool == "compare_funds" and str(result.get("metric") or "").startswith("allocation_"):
+            return "I retrieved the allocation comparison, but could not format one of the comparison fields safely."
+        return "I retrieved the Beacon data, but could not format one of the returned fields safely."
+
+
 def _answer_from_tool_result(result: dict[str, Any], messages: list[BaseMessage] | None = None) -> str:
     if not result.get("ok"):
         error = result.get("error", {})
@@ -2175,9 +2187,17 @@ def _answer_from_tool_result(result: dict[str, Any], messages: list[BaseMessage]
             f"in {result['period']}. That figure comes from the canonical cash-flow and fund summary records."
         )
     if tool == "compare_funds":
-        rows = result["rows"]
-        unit = result["comparison"].get("unit") or rows[0]["metric"].get("unit")
+        rows = result.get("rows") or []
+        if not rows:
+            return "I retrieved the fund comparison, but there were no comparison rows to display."
+        unit = (result.get("comparison") or {}).get("unit") or rows[0]["metric"].get("unit")
         first, second = rows[0], rows[1]
+        if result.get("metric") == "allocation_drift_pp":
+            asset = result.get("asset_class") or "allocation"
+            return (
+                f"For {asset} allocation drift in {result['period']}, {first['fund']} was "
+                f"{first['metric']['value']:+.2f}pp and {second['fund']} was {second['metric']['value']:+.2f}pp."
+            )
         return (
             f"For {result['metric']} in {result['period']}, {first['fund']} was {first['metric']['value']:.2f} "
             f"and {second['fund']} was {second['metric']['value']:.2f} {unit}."
