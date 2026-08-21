@@ -520,14 +520,6 @@ function clarificationSuggestions(text) {
       { label: "Consistency", message: "Consistency." }
     ];
   }
-  if ((lower.includes("performance") || lower.includes("perform")) && lower.includes("allocation") && lower.includes("manager")) {
-    return [
-      { label: "Performance vs benchmark", message: "Performance versus benchmark." },
-      { label: "Allocation vs policy", message: "Allocation versus policy." },
-      { label: "Managers", message: "Managers." },
-      { label: "Give me the full picture", message: "Give me the full picture." }
-    ];
-  }
   if (lower.includes("bpt") && lower.includes("ble")) {
     return [
       { label: "BPT", message: "BPT." },
