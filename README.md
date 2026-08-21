@@ -1,8 +1,11 @@
 
+Beacon Intelligence
+--------
+
 Beacon Intelligence is a prototype investment intelligence application built for the Beacon Capital Stewardship assessment.
 My approach to the build was deliberately problem first rather than technology first.
 I tend to work through projects using:
---------------------------------------
+
 Problem → Solution → System → Delivery
 --------------------------------------
 
