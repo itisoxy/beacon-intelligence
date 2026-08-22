@@ -695,11 +695,14 @@ def test_research_top_signal_followup_uses_previous_structured_result(model, tmp
 
     second = conversation.ask(thread_id, "Explain the top signal")
 
-    assert second["grounded_response"]["response_type"] == "research_signals"
+    assert second["grounded_response"]["response_type"] == "contextual_signal_explanation"
     assert second["resolved_context"]["active_fund"] == "BPT"
     assert second["resolved_context"]["active_period"] == "FY2026"
     assert second["resolved_context"]["primary_research_signal_id"] == top_signal_id
     assert "clarify" not in second["answer"].lower()
+    assert "| Signal | Evidence | Why it matters |" not in second["answer"]
+    assert "These are Beacon research signals" not in second["answer"]
+    assert "CIO question" not in second["answer"]
     assert any(event.get("tool") == "get_research_signals" for event in second["turn_tool_events"])
     assert any(event.get("arguments", {}).get("signal_id") == top_signal_id for event in second["turn_tool_events"])
     conversation.close()
@@ -714,8 +717,10 @@ def test_research_why_followup_retains_same_signal(model, tmp_path):
     conversation.ask(thread_id, "Explain the top signal")
     third = conversation.ask(thread_id, "Why does this matter?")
 
-    assert third["grounded_response"]["response_type"] == "research_signals"
+    assert third["grounded_response"]["response_type"] == "contextual_signal_explanation"
     assert third["resolved_context"]["primary_research_signal_id"] == top_signal_id
+    assert "On why" in third["answer"]
+    assert "CIO question" not in third["answer"]
     assert any(event.get("arguments", {}).get("signal_id") == top_signal_id for event in third["turn_tool_events"])
     conversation.close()
 
@@ -731,6 +736,20 @@ def test_research_source_followup_uses_top_signal_evidence(model, tmp_path):
     assert second["grounded_response"]["response_type"] == "source_evidence"
     assert any(event.get("tool") == "get_source_record" for event in second["turn_tool_events"])
     assert any(event.get("arguments", {}).get("record_id") == expected_record_id for event in second["turn_tool_events"])
+    conversation.close()
+
+
+def test_research_next_steps_followup_is_direct_not_generic_card(model, tmp_path):
+    conversation = AskBeaconConversation(ToolSelectingTestAdapter(), tmp_path / "ask_beacon_research_next.sqlite", model=model)
+    thread_id = "thread_research_next"
+
+    conversation.ask(thread_id, "What should I investigate about BPT?", {"fund": "BPT", "period": "FY2026"})
+    result = conversation.ask(thread_id, "What should I check next?")
+
+    assert result["grounded_response"]["response_type"] == "contextual_signal_explanation"
+    assert "On what to check next" in result["answer"]
+    assert "| Signal | Evidence | Why it matters |" not in result["answer"]
+    assert "CIO question" not in result["answer"]
     conversation.close()
 
 

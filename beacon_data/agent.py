@@ -214,6 +214,19 @@ def _interpret_natural_language(text: str, prior: str, context: dict[str, Any], 
 
     if _is_research_signal_followup(text):
         signal_id = _latest_research_signal_id(messages, recent_context)
+        if signal_id and _has_any(text, "worsen", "worse"):
+            if recent_context.get("active_asset_class"):
+                return {
+                    "type": "tool",
+                    "tool": "get_allocation_history",
+                    "arguments": {"fund": fund or recent_context.get("active_fund") or "BPT", "asset_class": recent_context["active_asset_class"]},
+                }
+            if recent_context.get("active_manager"):
+                return {
+                    "type": "tool",
+                    "tool": "get_manager_history",
+                    "arguments": {"manager": recent_context["active_manager"], "fund": fund or recent_context.get("active_fund")},
+                }
         if signal_id:
             return {"type": "tool", "tool": "get_research_signals", "arguments": {"fund": fund, "period": period, "asset_class": asset_class, "signal_id": signal_id}}
         if recent_context.get("last_response_type") == "fund_comparison":
@@ -1702,6 +1715,18 @@ def _structured_response_from_observations(observations: list[dict[str, Any]]) -
                 "record_ids": result.get("record_ids", []),
             }
             if response_type == "research_signals":
+                if result.get("arguments", {}).get("signal_id"):
+                    rows = result.get("rows", [])
+                    signal = rows[0] if rows else {}
+                    return {
+                        **common,
+                        "response_type": "contextual_signal_explanation",
+                        "fund": signal.get("fund") or result.get("arguments", {}).get("fund"),
+                        "period": signal.get("period") or result.get("arguments", {}).get("period"),
+                        "asset_class": signal.get("asset_class"),
+                        "manager": signal.get("manager"),
+                        "signal": signal,
+                    }
                 return {**common, "fund": result.get("arguments", {}).get("fund"), "period": result.get("arguments", {}).get("period"), "signals": result.get("rows", [])}
             if response_type == "manager_ranking":
                 return {
@@ -2427,6 +2452,8 @@ def _answer_from_tool_result(result: dict[str, Any], messages: list[BaseMessage]
     if tool == "get_research_signals":
         rows = result["rows"][:3]
         fund = result.get("arguments", {}).get("fund") or (rows[0].get("fund") if rows else "the selected portfolio")
+        if result.get("arguments", {}).get("signal_id"):
+            return _selected_research_signal_answer(rows[0] if rows else {}, messages or [], fund)
         table = [
             "| Signal | Evidence | Why it matters |",
             "|---|---|---|",
@@ -2460,6 +2487,89 @@ def _answer_from_tool_result(result: dict[str, Any], messages: list[BaseMessage]
         rows = provenance.get("source_rows") or []
         return f"That traces to {files[0] if files else 'the Beacon source data'}, {sheets[0] if sheets else 'source sheet unavailable'}, row {rows[0] if rows else 'unavailable'}."
     return "I retrieved the requested Beacon tool result."
+
+
+def _selected_research_signal_answer(signal: dict[str, Any], messages: list[BaseMessage], fallback_fund: str | None = None) -> str:
+    if not signal:
+        return "I found the prior research signal context, but the selected signal is no longer available in the current filtered data."
+    latest = _latest_human_text(messages).lower()
+    fund = signal.get("fund") or fallback_fund or "the selected fund"
+    period = signal.get("period") or signal.get("horizon") or "the selected period"
+    subject = _research_signal_subject(signal)
+    lead_topic = f"{fund}'s {period} {subject}"
+    observation = signal.get("observation") or signal.get("headline") or "Beacon identified this as a supported research signal."
+    interpretation = signal.get("interpretation")
+    why = signal.get("why_it_matters")
+    limitations = signal.get("limitations")
+    possible = _as_list(signal.get("possible_explanations"))
+    checks = _as_list(signal.get("what_to_check_next"))
+    metrics = _format_supporting_metrics(signal.get("supporting_metrics") or {})
+
+    if "check next" in latest or "look at next" in latest:
+        opener = f"On what to check next for {lead_topic}: focus on the follow-up tests that would confirm whether this signal is material."
+        detail = checks[:3] or possible[:2] or ["Review the linked source records and compare the signal against the relevant canonical metrics."]
+        return opener + "\n\n" + "\n".join(f"- {item}" for item in detail)
+
+    if "why" in latest or "matter" in latest:
+        opener = f"On why {lead_topic} matters: {why or interpretation or observation}"
+        parts = [opener]
+        if metrics:
+            parts.append(metrics)
+        if limitations:
+            parts.append(f"Limitation: {limitations}")
+        if possible:
+            parts.append("Possible explanation: " + possible[0])
+        return "\n\n".join(parts)
+
+    if "number" in latest:
+        opener = f"On the numbers behind {lead_topic}: the signal is supported by the Beacon metrics below."
+        return "\n\n".join(part for part in (opener, metrics or observation, f"Limitation: {limitations}" if limitations else None) if part)
+
+    opener = f"On {fund}'s top {period} research signal: {observation}"
+    parts = [opener]
+    if interpretation:
+        parts.append(interpretation)
+    if metrics:
+        parts.append(metrics)
+    if possible:
+        parts.append("The data suggests a possible explanation to test: " + possible[0])
+    if limitations:
+        parts.append(f"Limitation: {limitations}")
+    return "\n\n".join(parts)
+
+
+def _research_signal_subject(signal: dict[str, Any]) -> str:
+    if signal.get("asset_class"):
+        return f"{signal['asset_class']} signal"
+    if signal.get("manager"):
+        return f"{signal['manager']} signal"
+    signal_type = str(signal.get("type") or "research").replace("_", "-")
+    return f"{signal_type} signal"
+
+
+def _as_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    if value:
+        return [str(value)]
+    return []
+
+
+def _format_supporting_metrics(metrics: dict[str, Any]) -> str | None:
+    if not isinstance(metrics, dict) or not metrics:
+        return None
+    rows = []
+    for key, value in list(metrics.items())[:5]:
+        rows.append(f"- {key.replace('_', ' ').title()}: {_format_signal_metric_value(value)}")
+    return "Supporting evidence:\n" + "\n".join(rows) if rows else None
+
+
+def _format_signal_metric_value(value: Any) -> str:
+    if isinstance(value, list):
+        return " / ".join(_format_signal_metric_value(item) for item in value)
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
 
 
 def _application_context_from_messages(messages: list[BaseMessage]) -> dict[str, Any]:
